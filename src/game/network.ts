@@ -23,6 +23,9 @@ export interface NetworkCallbacks {
   onRoomUpdate?: (room: RoomInfo) => void;
   onRoomError?: (error: string) => void;
   onMatchStarted?: (room: RoomInfo) => void;
+  onSessionRestored?: (room: RoomInfo, yourId: string) => void;
+  onPingUpdate?: (pingMs: number) => void;
+  onPlayerConnectionState?: (playerId: string, connected: boolean) => void;
   onPlayerState?: (senderId: string, snapshot: RemoteActorSnapshot) => void;
   onShoot?: (
     senderId: string,
@@ -76,15 +79,34 @@ export class TacticalNetworkClient {
   private pendingQueue: string[] = [];
   public clientId: string | null = null;
   public currentRoom: RoomInfo | null = null;
+  public latency: number = 0;
+
+  private lastUrl: string | undefined;
+  public lastPlayerName: string = 'Operator';
+  private intentionalDisconnect: boolean = false;
+  private reconnectAttempts: number = 0;
+  private reconnectTimer: number | null = null;
+  private pingInterval: number | null = null;
+  private lastMessageTime: number = 0;
 
   public setCallbacks(cb: NetworkCallbacks): void {
     this.callbacks = { ...this.callbacks, ...cb };
   }
 
   public connect(url?: string): void {
-    const targetUrl = (url && url.trim()) || getDefaultWebSocketUrl();
+    const targetUrl = (url && url.trim()) || this.lastUrl || getDefaultWebSocketUrl();
+    this.lastUrl = targetUrl;
+    this.intentionalDisconnect = false;
+
+    if (this.reconnectTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-      this.ws.close();
+      try {
+        this.ws.close();
+      } catch {}
     }
 
     this.callbacks.onStatusChange?.('connecting');
@@ -93,14 +115,37 @@ export class TacticalNetworkClient {
       this.ws = ws;
 
       ws.onopen = () => {
+        this.reconnectAttempts = 0;
+        this.lastMessageTime = Date.now();
         this.callbacks.onStatusChange?.('connected');
+
+        this.startHeartbeat();
+
+        // If we previously had an active room & client ID, attempt immediate session recovery
+        if (this.currentRoom && this.clientId) {
+          console.log(`[network] Attempting session recovery for client ${this.clientId} in room ${this.currentRoom.id}`);
+          this.send({
+            type: 'reconnect_session',
+            roomId: this.currentRoom.id,
+            clientId: this.clientId,
+            playerName: this.lastPlayerName,
+          });
+        }
+
         while (this.pendingQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
           const msg = this.pendingQueue.shift();
-          if (msg) ws.send(msg);
+          if (msg) {
+            try {
+              ws.send(msg);
+            } catch (e) {
+              console.warn('[network] Pending send failed:', e);
+            }
+          }
         }
       };
 
       ws.onmessage = (evt) => {
+        this.lastMessageTime = Date.now();
         let msg: Record<string, unknown>;
         try {
           msg = JSON.parse(String(evt.data)) as Record<string, unknown>;
@@ -112,12 +157,37 @@ export class TacticalNetworkClient {
 
         switch (type) {
           case 'welcome':
-            this.clientId = String(msg.clientId || '');
+            // Only adopt new client ID if we do not already have an established one
+            if (!this.clientId) {
+              this.clientId = String(msg.clientId || '');
+            }
             this.callbacks.onWelcome?.(this.clientId);
+            break;
+          case 'pong': {
+            const clientTime = Number(msg.clientTime || 0);
+            if (clientTime > 0) {
+              this.latency = Math.max(1, Math.round(performance.now() - clientTime));
+              this.callbacks.onPingUpdate?.(this.latency);
+            }
+            break;
+          }
+          case 'session_restored':
+            this.currentRoom = msg.room as RoomInfo;
+            this.clientId = String(msg.yourId || this.clientId);
+            console.log(`[network] Session restored in room ${this.currentRoom.id}`);
+            this.callbacks.onSessionRestored?.(this.currentRoom, this.clientId);
+            this.callbacks.onRoomUpdate?.(this.currentRoom);
+            break;
+          case 'player_connection_state':
+            this.callbacks.onPlayerConnectionState?.(
+              String(msg.playerId || ''),
+              Boolean(msg.connected)
+            );
             break;
           case 'room_joined':
             this.currentRoom = msg.room as RoomInfo;
-            this.callbacks.onRoomJoined?.(this.currentRoom, String(msg.yourId || ''));
+            this.clientId = String(msg.yourId || this.clientId);
+            this.callbacks.onRoomJoined?.(this.currentRoom, this.clientId);
             break;
           case 'room_update':
             this.currentRoom = msg.room as RoomInfo;
@@ -185,20 +255,73 @@ export class TacticalNetworkClient {
       };
 
       ws.onerror = () => {
+        this.stopHeartbeat();
         this.callbacks.onStatusChange?.('disconnected', 'WebSocket connection error');
+        this.scheduleReconnect();
       };
 
       ws.onclose = () => {
+        this.stopHeartbeat();
         this.callbacks.onStatusChange?.('disconnected');
+        this.scheduleReconnect();
       };
     } catch (err) {
+      this.stopHeartbeat();
       this.callbacks.onStatusChange?.('disconnected', String(err));
+      this.scheduleReconnect();
     }
   }
 
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    if (typeof window === 'undefined') return;
+    this.pingInterval = window.setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        // Send application ping
+        this.send({ type: 'ping', clientTime: performance.now() });
+
+        // Check if connection is stale (no message for > 12s)
+        if (Date.now() - this.lastMessageTime > 12000) {
+          console.warn('[network] Connection stale (no frames for >12s). Reconnecting.');
+          try {
+            this.ws.close();
+          } catch {}
+        }
+      }
+    }, 4000);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.pingInterval !== null && typeof window !== 'undefined') {
+      window.clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.intentionalDisconnect || typeof window === 'undefined') return;
+    if (this.reconnectTimer !== null) return;
+
+    this.reconnectAttempts++;
+    const delay = Math.min(2500, 400 + Math.min(this.reconnectAttempts, 5) * 400);
+    console.log(`[network] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})...`);
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
+  }
+
   public disconnect(): void {
+    this.intentionalDisconnect = true;
+    this.stopHeartbeat();
+    if (this.reconnectTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.ws) {
-      this.ws.close();
+      try {
+        this.ws.close();
+      } catch {}
       this.ws = null;
     }
     this.currentRoom = null;
@@ -207,9 +330,15 @@ export class TacticalNetworkClient {
   public send(payload: unknown): void {
     const raw = JSON.stringify(payload);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(raw);
+      try {
+        this.ws.send(raw);
+      } catch (e) {
+        console.warn('[network] ws.send failed:', e);
+      }
     } else if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
-      this.pendingQueue.push(raw);
+      if (this.pendingQueue.length < 50) {
+        this.pendingQueue.push(raw);
+      }
     }
   }
 
@@ -220,10 +349,12 @@ export class TacticalNetworkClient {
     mapId: import('./types').MapId;
     botDifficulty: BotDifficulty;
   }): void {
+    this.lastPlayerName = params.playerName;
     this.send({ type: 'create_room', ...params });
   }
 
   public joinRoom(params: { roomId: string; playerName: string; team?: Team }): void {
+    this.lastPlayerName = params.playerName;
     this.send({ type: 'join_room', ...params });
   }
 

@@ -227,6 +227,19 @@ export class GameEngine {
   private pointerLockWarmupEvents = 0;
   private onEscapePause?: () => void;
   private spectateTargetId: string | null = null;
+  private deathCamera = {
+    active: false,
+    killerName: '',
+    weaponName: '',
+    headshot: false,
+    deathX: 0,
+    deathY: 0,
+    deathZ: 0,
+    deathYaw: 0,
+    camPitch: 0.28,
+    camYaw: 0,
+    camDist: 2.6,
+  };
   private isHostAuthority = true;
   private actors: ActorState[] = [];
   private botBrains = new Map<string, BotBrainState>();
@@ -848,7 +861,23 @@ export class GameEngine {
       return;
     }
     const local = this.getLocalActor();
-    if (!local || !local.alive) return;
+    if (!local) return;
+
+    if (!local.alive) {
+      if (this.deathCamera.active && !this.spectateTargetId) {
+        if (Math.abs(e.movementX) > 220 || Math.abs(e.movementY) > 220) return;
+        const mx = THREE.MathUtils.clamp(e.movementX, -120, 120);
+        const my = THREE.MathUtils.clamp(e.movementY, -120, 120);
+        const sens = 0.0022 * this.mouseSensitivity;
+        this.deathCamera.camYaw -= mx * sens;
+        this.deathCamera.camPitch = THREE.MathUtils.clamp(
+          this.deathCamera.camPitch + my * sens,
+          -Math.PI * 0.15,
+          Math.PI * 0.38
+        );
+      }
+      return;
+    }
 
     // Reject anomalous single-frame browser/OS cursor warp-back spikes when locked
     if (Math.abs(e.movementX) > 220 || Math.abs(e.movementY) > 220) {
@@ -1145,10 +1174,11 @@ export class GameEngine {
     }
 
     for (const actor of this.actors) {
-      if (!actor.isLocal) {
-        const handle = createOperatorModel(actor.id, actor.team);
-        this.scene.add(handle.root);
-        this.actorMeshes.set(actor.id, handle);
+      const handle = createOperatorModel(actor.id, actor.team);
+      this.scene.add(handle.root);
+      this.actorMeshes.set(actor.id, handle);
+      if (actor.isLocal) {
+        handle.root.visible = false;
       }
     }
 
@@ -1228,6 +1258,29 @@ export class GameEngine {
     this.spectateTargetId = null;
     this.c4PickupCooldown = 0;
     this.c4DropperId = null;
+    this.deathCamera = {
+      active: false,
+      killerName: '',
+      weaponName: '',
+      headshot: false,
+      deathX: 0,
+      deathY: 0,
+      deathZ: 0,
+      deathYaw: 0,
+      camPitch: 0.28,
+      camYaw: 0,
+      camDist: 2.6,
+    };
+    this.viewmodelRig.visible = true;
+
+    for (const actor of this.actors) {
+      const handle = this.actorMeshes.get(actor.id);
+      if (handle) {
+        handle.root.rotation.set(0, actor.yaw, 0);
+        handle.headGroup.rotation.set(0, 0, 0);
+        handle.root.visible = !actor.isLocal;
+      }
+    }
 
     if (isHalftimeRound(this.roundNumber, this.config.maxRounds)) {
       const prevAtk = this.attackerScore;
@@ -2127,7 +2180,7 @@ export class GameEngine {
     const hitboxMeshes: THREE.Mesh[] = [];
     for (const a of this.actors) {
       if (!a.alive || a.id === shooter.id || a.team === shooter.team) continue;
-      if (a.isLocal) {
+      if (a.isLocal && shooter.isBot) {
         const hitZone = this.raycastLocalPlayerSphere(ox, oy, oz, dx, dy, dz, a, wallDist);
         if (hitZone) {
           const dist = Math.hypot(a.x - ox, a.z - oz);
@@ -2278,6 +2331,19 @@ export class GameEngine {
       if (actor.isLocal) {
         this.hitmarker = 'body';
         this.hitmarkerTimer = 0.2;
+        if ((this.config.mode === 'pvp' || this.config.mode === 'mixed') && !target.isBot) {
+          networkClient.send({
+            type: 'hit_claim',
+            payload: {
+              targetId: target.id,
+              damage: dmg,
+              armorDamage: 4,
+              headshot: false,
+              wallbang: false,
+              weaponId: actor.knife,
+            },
+          });
+        }
       }
       this.applyDamage(actor, target, dmg, 4, actor.knife, false, false, 0.05);
       break;
@@ -2333,6 +2399,26 @@ export class GameEngine {
         this.meleeAnimTimer = 0;
         this.flinchPitch = 0;
         victim.blindTimer = 0;
+        this.viewmodelRig.visible = false;
+
+        const killerDisplayName = attacker?.name ?? 'Enemy Operator';
+        const weaponDisplayName = WEAPONS[weaponId]?.name ?? weaponId;
+        this.deathCamera = {
+          active: true,
+          killerName: killerDisplayName,
+          weaponName: weaponDisplayName,
+          headshot,
+          deathX: victim.x,
+          deathY: victim.y,
+          deathZ: victim.z,
+          deathYaw: victim.yaw,
+          camPitch: 0.28,
+          camYaw: victim.yaw + Math.PI,
+          camDist: 2.6,
+        };
+
+        const allies = this.actors.filter((a) => a.alive && a.team === victim.team && !a.isLocal);
+        this.spectateTargetId = allies.length > 0 ? allies[0].id : null;
       }
 
       if (attacker && attacker.id !== victim.id) {
@@ -2587,6 +2673,19 @@ export class GameEngine {
           if (!a.alive) continue;
           const dist = Math.hypot(a.x - f.x, a.z - f.z);
           if (dist <= f.radius && a.y < 1.2) {
+            if (owner?.isLocal && (this.config.mode === 'pvp' || this.config.mode === 'mixed') && !a.isBot) {
+              networkClient.send({
+                type: 'hit_claim',
+                payload: {
+                  targetId: a.id,
+                  damage: 14,
+                  armorDamage: 0,
+                  headshot: false,
+                  wallbang: false,
+                  weaponId: 'molotov',
+                },
+              });
+            }
             this.applyDamage(owner, a, 14, 0, 'molotov', false, false, 0);
           }
         }
@@ -2637,6 +2736,19 @@ export class GameEngine {
         const dist = Math.hypot(a.x - g.x, a.y + 1.0 - g.y, a.z - g.z);
         const { hpDamage, armorDamage } = calculateHeExplosionDamage(dist, a.armor);
         if (hpDamage > 0) {
+          if (owner?.isLocal && (this.config.mode === 'pvp' || this.config.mode === 'mixed') && !a.isBot) {
+            networkClient.send({
+              type: 'hit_claim',
+              payload: {
+                targetId: a.id,
+                damage: hpDamage,
+                armorDamage,
+                headshot: false,
+                wallbang: false,
+                weaponId: 'he',
+              },
+            });
+          }
           this.applyDamage(owner, a, hpDamage, armorDamage, 'he', false, false, 0.06);
         }
       }
@@ -2875,6 +2987,19 @@ export class GameEngine {
 
   private setupNetworkListeners(): void {
     networkClient.setCallbacks({
+      onSessionRestored: (room, yourId) => {
+        console.log(`[engine] Session restored in room ${room.id} as ${yourId}`);
+        this.roundBanner = 'CONNECTED TO MATCH';
+        this.roundBannerTimer = 2.5;
+        this.emitHud(true);
+      },
+      onPlayerConnectionState: (playerId, connected) => {
+        const p = this.actors.find((a) => a.id === playerId);
+        const name = p?.name ?? 'Player';
+        this.roundBanner = connected ? `${name} RECONNECTED` : `${name} DISCONNECTED`;
+        this.roundBannerTimer = 3.0;
+        this.emitHud(true);
+      },
       onPlayerState: (senderId, snap) => {
         const actor = this.actors.find((a) => a.id === senderId);
         if (!actor || actor.isLocal) return;
@@ -2971,11 +3096,20 @@ export class GameEngine {
         const prevAtkScore = this.attackerScore;
         const prevDefScore = this.defenderScore;
 
-        this.roundNumber = Number(payload.roundNumber ?? this.roundNumber);
+        const newRound = Number(payload.roundNumber ?? this.roundNumber);
+        const newPhase = (payload.phase as RoundPhase) ?? this.phase;
+
+        this.roundNumber = newRound;
         this.attackerScore = Number(payload.attackerScore ?? this.attackerScore);
         this.defenderScore = Number(payload.defenderScore ?? this.defenderScore);
-        this.phase = (payload.phase as RoundPhase) ?? this.phase;
+        this.phase = newPhase;
         this.phaseTimeRemaining = Number(payload.phaseTimeRemaining ?? this.phaseTimeRemaining);
+
+        // Transition into new round
+        if (newRound > prevRound || (prevPhase === 'round_end' && newPhase === 'buy')) {
+          this.setupClientRound(payload);
+          return;
+        }
 
         if (prevPhase === 'buy' && this.phase === 'live') {
           this.triggerRoundStartVoiceline();
@@ -2999,8 +3133,11 @@ export class GameEngine {
           for (const remote of payload.actors as Array<Partial<ActorState>>) {
             const target = this.actors.find((a) => a.id === remote.id);
             if (!target) continue;
-            target.alive = Boolean(remote.alive);
-            target.hp = Number(remote.hp ?? target.hp);
+            // Never overwrite local player's hp/alive with stale remote broadcast while alive
+            if (!target.isLocal) {
+              target.alive = Boolean(remote.alive);
+              target.hp = Number(remote.hp ?? target.hp);
+            }
             target.kills = Number(remote.kills ?? target.kills);
             target.deaths = Number(remote.deaths ?? target.deaths);
             if (target.isBot && remote.x !== undefined) {
@@ -3013,6 +3150,100 @@ export class GameEngine {
         }
       },
     });
+  }
+
+  private setupClientRound(payload: Record<string, unknown>): void {
+    this.restoreDefaultPlayerControl();
+    this.clearRoundEntities();
+    this.killFeed = [];
+    this.hitmarker = 'none';
+    this.hitmarkerTimer = 0;
+    this.damageFlash = 0;
+    this.phase = 'buy';
+    this.phaseTimeRemaining = Number(payload.phaseTimeRemaining ?? ROUND_CONSTANTS.BUY_PHASE_SECONDS);
+    this.roundBanner = `ROUND ${this.roundNumber} · BUY PHASE`;
+    this.roundBannerTimer = 3.0;
+    this.scopeZoom = 0;
+    this.camera.fov = 78;
+    this.camera.updateProjectionMatrix();
+    this.reloadTimer = 0;
+    this.fireCooldown = 0;
+    this.awpBoltTimer = 0;
+    this.awpShellEjected = false;
+    this.recoilBloom = 0;
+    this.flinchPitch = 0;
+    this.killConfirm = null;
+    this.killConfirmTimer = 0;
+    this.spectateTargetId = null;
+    this.c4PickupCooldown = 0;
+    this.c4DropperId = null;
+    this.deathCamera = {
+      active: false,
+      killerName: '',
+      weaponName: '',
+      headshot: false,
+      deathX: 0,
+      deathY: 0,
+      deathZ: 0,
+      deathYaw: 0,
+      camPitch: 0.28,
+      camYaw: 0,
+      camDist: 2.6,
+    };
+    this.viewmodelRig.visible = true;
+
+    if (Array.isArray(payload.actors)) {
+      for (const remote of payload.actors as Array<Partial<ActorState>>) {
+        const target = this.actors.find((a) => a.id === remote.id);
+        if (!target) continue;
+        target.alive = true;
+        target.hp = 100;
+        target.blindTimer = 0;
+        target.hurtFlash = 0;
+        target.crouching = false;
+        target.grounded = true;
+        target.vx = 0;
+        target.vy = 0;
+        target.vz = 0;
+        if (remote.x !== undefined) {
+          target.x = remote.x;
+          target.y = remote.y ?? 0;
+          target.z = remote.z ?? 0;
+          target.yaw = remote.yaw ?? 0;
+          target.pitch = 0;
+        }
+        if (target.isLocal) {
+          target.inBuyZone = true;
+          if (!target.secondary) {
+            target.secondary = createWeaponInstance(getStarterPistol(target.team));
+          } else {
+            const spec = WEAPONS[target.secondary.id];
+            target.secondary.mag = spec.magSize;
+            target.secondary.reserve = spec.reserveAmmo;
+          }
+          if (target.primary) {
+            const spec = WEAPONS[target.primary.id];
+            target.primary.mag = spec.magSize;
+            target.primary.reserve = spec.reserveAmmo;
+          }
+          target.activeSlot = target.primary ? 1 : 2;
+          this.triggerEquipAnim(this.getActiveWeaponId(target));
+        }
+      }
+    }
+
+    for (const actor of this.actors) {
+      const handle = this.actorMeshes.get(actor.id);
+      if (handle) {
+        handle.root.rotation.set(0, actor.yaw, 0);
+        handle.headGroup.rotation.set(0, 0, 0);
+        handle.root.visible = !actor.isLocal;
+      }
+    }
+
+    this.syncCameraToLocal();
+    this.syncActorMeshes(null, performance.now());
+    this.emitHud(true);
   }
 
   private broadcastRoundSync(): void {
@@ -3109,12 +3340,18 @@ export class GameEngine {
       }
     } else if (this.phase === 'live') {
       this.phaseTimeRemaining -= dt;
-      if (this.phaseTimeRemaining <= 0 && this.isHostAuthority) {
-        this.concludeRound('defenders', 'TIME EXPIRED', false);
+      if (this.isHostAuthority) {
+        this.checkRoundEndConditions();
+        if (this.phaseTimeRemaining <= 0) {
+          this.concludeRound('defenders', 'TIME EXPIRED', false);
+        }
       }
     } else if (this.phase === 'planted') {
       this.bomb.timerRemaining -= dt;
       this.phaseTimeRemaining = this.bomb.timerRemaining;
+      if (this.isHostAuthority) {
+        this.checkRoundEndConditions();
+      }
       this.bombBeepAccum += dt;
       const beepInterval = this.bomb.timerRemaining < 10 ? 0.28 : 0.75;
       if (this.bombBeepAccum >= beepInterval) {
@@ -3623,12 +3860,9 @@ export class GameEngine {
       );
       return [...preferred, ...others];
     }
-    const aliveAllies = this.actors.filter(
+    return this.actors.filter(
       (a) => a.alive && a.team === local.team && !a.isLocal
     );
-    return aliveAllies.length > 0
-      ? aliveAllies
-      : this.actors.filter((a) => a.alive && !a.isLocal);
   }
 
   private getSpectateTarget(local?: ActorState): ActorState | null {
@@ -3722,20 +3956,41 @@ export class GameEngine {
         actor.isLocal ||
         actor.id === this.localActorId ||
         actor.id === activeSpec?.id;
+
+      if (!actor.alive) {
+        // Render fallen corpse on the floor
+        handle.root.visible = true;
+        handle.root.position.set(actor.x, actor.y + 0.12, actor.z);
+        handle.root.rotation.set(-Math.PI * 0.48, 0, actor.yaw, 'ZXY');
+        handle.bodyGroup.scale.y = 1.0;
+        handle.headGroup.visible = true;
+        handle.headGroup.rotation.x = 0.2;
+        handle.helmetMesh.visible = actor.hasHelmet;
+        handle.shadowDisc.visible = false;
+        handle.c4BackMesh.visible = false;
+        handle.leftLeg.rotation.x = 0.1;
+        handle.rightLeg.rotation.x = -0.1;
+        for (const xm of handle.xrayMeshes) {
+          xm.visible = false;
+        }
+        continue;
+      }
+
       const closeToCam =
         Math.hypot(actor.x - this.camera.position.x, actor.z - this.camera.position.z) < 0.95 &&
         Math.abs(actor.y + 1.35 - this.camera.position.y) < 1.35;
-      const visible = actor.alive && !isViewer && !closeToCam;
+      const visible = !isViewer && !closeToCam;
       handle.root.visible = visible;
       handle.headGroup.visible = visible;
       handle.helmetMesh.visible = visible && actor.hasHelmet;
+      handle.shadowDisc.visible = visible;
       const showXray = visible && this.config.mode === 'spectate' && this.xrayEnabled;
       for (const xm of handle.xrayMeshes) {
         xm.visible = showXray;
       }
-      if (!actor.alive || isViewer) continue;
+      if (isViewer) continue;
       handle.root.position.set(actor.x, actor.y, actor.z);
-      handle.root.rotation.y = actor.yaw;
+      handle.root.rotation.set(0, actor.yaw, 0);
       handle.headGroup.rotation.x = actor.pitch * 0.65;
       handle.bodyGroup.scale.y = actor.crouching ? 0.72 : 1.0;
       handle.c4BackMesh.visible = actor.hasC4;
@@ -3757,6 +4012,19 @@ export class GameEngine {
     dt: number,
     nowMs: number
   ): void {
+    if (this.deathCamera.active && !specTarget) {
+      this.viewmodelRig.visible = false;
+      const camDist = this.deathCamera.camDist;
+      const camPitch = this.deathCamera.camPitch;
+      const camYaw = this.deathCamera.camYaw;
+      const camX = this.deathCamera.deathX + Math.sin(camYaw) * Math.cos(camPitch) * camDist;
+      const camY = this.deathCamera.deathY + 1.4 + Math.sin(camPitch) * camDist;
+      const camZ = this.deathCamera.deathZ + Math.cos(camYaw) * Math.cos(camPitch) * camDist;
+      this.camera.position.set(camX, camY, camZ);
+      this.camera.lookAt(this.deathCamera.deathX, this.deathCamera.deathY + 0.5, this.deathCamera.deathZ);
+      return;
+    }
+
     if (specTarget) {
       const eyeY = specTarget.y + (specTarget.crouching ? 1.08 : 1.62);
       this.camera.position.set(specTarget.x, eyeY, specTarget.z);
@@ -4035,6 +4303,8 @@ export class GameEngine {
         damageFlash: 0,
         hitmarker: 'none',
         killConfirm: null,
+        deathInfo: null,
+        pingMs: networkClient.latency,
         interactPrompt: null,
         killFeed: [],
         radarBlips: [],
@@ -4248,6 +4518,14 @@ export class GameEngine {
       damageFlash: localAliveNow ? this.damageFlash : 0,
       hitmarker: localAliveNow ? this.hitmarker : 'none',
       killConfirm: this.killConfirm,
+      deathInfo: this.deathCamera.active
+        ? {
+            killerName: this.deathCamera.killerName,
+            weaponName: this.deathCamera.weaponName,
+            headshot: this.deathCamera.headshot,
+          }
+        : null,
+      pingMs: networkClient.latency,
       interactPrompt,
       killFeed: [...this.killFeed],
       radarBlips,

@@ -56,6 +56,27 @@ export function MainMenu({
       },
       onRoomUpdate: (r) => setRoom(r),
       onRoomError: (err) => setLobbyError(err),
+      onSessionRestored: (r, id) => {
+        setRoom(r);
+        setYourId(id);
+        setMapId(r.mapId);
+        onPreviewMap(r.mapId);
+        setLobbyError(null);
+        if (r.started) {
+          const me = r.players.find((p) => p.id === (id ?? networkClient.clientId));
+          onStartMatch({
+            mode: r.mode,
+            mapId: r.mapId,
+            playerTeam: me?.team ?? playerTeam,
+            playerName: me?.name ?? playerName,
+            difficulty: r.botDifficulty,
+            maxRounds,
+            legacyBots,
+            room: r,
+            localClientId: id ?? networkClient.clientId,
+          });
+        }
+      },
       onMatchStarted: (r) => {
         const me = r.players.find((p) => p.id === (yourId ?? networkClient.clientId));
         onStartMatch({

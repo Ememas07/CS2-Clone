@@ -94,6 +94,9 @@ interface ClientMeta {
   roomId: string | null;
   team: 'attackers' | 'defenders';
   ws: WebSocket;
+  isAlive?: boolean;
+  disconnectedAt?: number;
+  disconnectTimer?: NodeJS.Timeout;
 }
 
 interface RoomState {
@@ -121,9 +124,12 @@ function makeRoomCode(): string {
   return rooms.has(code) ? makeRoomCode() : code;
 }
 
-function sendJson(ws: WebSocket, payload: unknown): void {
-  if (ws.readyState === WebSocket.OPEN) {
+function sendJson(ws: WebSocket | null | undefined, payload: unknown): void {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
     ws.send(JSON.stringify(payload));
+  } catch (err) {
+    console.warn('[ws sendJson error]:', err);
   }
 }
 
@@ -131,8 +137,12 @@ function broadcastRoom(room: RoomState, payload: unknown, excludeId?: string): v
   const raw = JSON.stringify(payload);
   for (const client of room.clients.values()) {
     if (excludeId && client.id === excludeId) continue;
-    if (client.ws.readyState === WebSocket.OPEN) {
-      client.ws.send(raw);
+    if (client.ws && client.ws.readyState === WebSocket.OPEN) {
+      try {
+        client.ws.send(raw);
+      } catch (err) {
+        console.warn(`[broadcastRoom error client ${client.id}]:`, err);
+      }
     }
   }
 }
@@ -150,11 +160,16 @@ function serializeRoom(room: RoomState) {
       name: c.name,
       team: c.team,
       isHost: c.id === room.hostId,
+      connected: !c.disconnectedAt && c.ws.readyState === WebSocket.OPEN,
     })),
   };
 }
 
 function leaveCurrentRoom(meta: ClientMeta): void {
+  if (meta.disconnectTimer) {
+    clearTimeout(meta.disconnectTimer);
+    meta.disconnectTimer = undefined;
+  }
   if (!meta.roomId) return;
   const room = rooms.get(meta.roomId);
   meta.roomId = null;
@@ -182,7 +197,53 @@ function leaveCurrentRoom(meta: ClientMeta): void {
 async function startServer(): Promise<void> {
   const app = express();
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  const wss = new WebSocketServer({ noServer: true });
+
+  wss.on('error', (err) => {
+    console.error('[wss error]:', err);
+  });
+
+  server.on('upgrade', (request, socket, head) => {
+    try {
+      const url = new URL(request.url || '', `http://${request.headers.host || 'localhost'}`);
+      if (url.pathname === '/ws') {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit('connection', ws, request);
+        });
+        return;
+      }
+    } catch {
+      socket.destroy();
+    }
+  });
+
+  // Heartbeat ping-pong every 10s to keep connections alive and clear dead sockets
+  const HEARTBEAT_INTERVAL_MS = 10000;
+  const heartbeatTimer = setInterval(() => {
+    for (const [ws, meta] of clients.entries()) {
+      if (meta.isAlive === false) {
+        console.log(`[ws] Heartbeat timed out for client ${meta.id}. Closing.`);
+        try {
+          ws.terminate();
+        } catch {}
+        clients.delete(ws);
+        continue;
+      }
+      meta.isAlive = false;
+      try {
+        ws.ping();
+      } catch {
+        try {
+          ws.terminate();
+        } catch {}
+        clients.delete(ws);
+      }
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+
+  server.on('close', () => {
+    clearInterval(heartbeatTimer);
+  });
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, rooms: rooms.size });
@@ -229,8 +290,17 @@ async function startServer(): Promise<void> {
       roomId: null,
       team: 'attackers',
       ws,
+      isAlive: true,
     };
     clients.set(ws, meta);
+
+    ws.on('pong', () => {
+      meta.isAlive = true;
+    });
+
+    ws.on('error', (err) => {
+      console.warn(`[ws client error ${meta.id}]:`, err.message);
+    });
 
     sendJson(ws, { type: 'welcome', clientId });
 
@@ -243,6 +313,62 @@ async function startServer(): Promise<void> {
       }
 
       const type = String(msg.type || '');
+
+      // Heartbeat ping/pong for RTT measurement and keepalive
+      if (type === 'ping') {
+        meta.isAlive = true;
+        sendJson(ws, {
+          type: 'pong',
+          clientTime: msg.clientTime ?? 0,
+          serverTime: Date.now(),
+        });
+        return;
+      }
+
+      if (type === 'reconnect_session') {
+        const roomId = String(msg.roomId || '').trim().toUpperCase();
+        const existingClientId = String(msg.clientId || '');
+        const room = rooms.get(roomId);
+        if (room) {
+          const existingClient = room.clients.get(existingClientId);
+          if (existingClient) {
+            console.log(`[ws] Restoring session for client ${existingClientId} in room ${roomId}`);
+            if (existingClient.disconnectTimer) {
+              clearTimeout(existingClient.disconnectTimer);
+              existingClient.disconnectTimer = undefined;
+            }
+            existingClient.disconnectedAt = undefined;
+            if (existingClient.ws && existingClient.ws !== ws && existingClient.ws.readyState === WebSocket.OPEN) {
+              try {
+                existingClient.ws.close();
+              } catch {}
+            }
+            clients.delete(existingClient.ws);
+            existingClient.ws = ws;
+            existingClient.isAlive = true;
+            clients.set(ws, existingClient);
+            clients.delete(meta.ws);
+
+            sendJson(ws, {
+              type: 'session_restored',
+              room: serializeRoom(room),
+              yourId: existingClient.id,
+            });
+            broadcastRoom(
+              room,
+              {
+                type: 'player_connection_state',
+                playerId: existingClient.id,
+                connected: true,
+              },
+              existingClient.id
+            );
+            return;
+          }
+        }
+        sendJson(ws, { type: 'room_error', error: 'Previous session expired or room closed' });
+        return;
+      }
 
       if (type === 'create_room') {
         leaveCurrentRoom(meta);
@@ -377,8 +503,32 @@ async function startServer(): Promise<void> {
     });
 
     ws.on('close', () => {
-      leaveCurrentRoom(meta);
       clients.delete(ws);
+      if (!meta.roomId) return;
+      const room = rooms.get(meta.roomId);
+      if (!room) return;
+
+      if (room.started) {
+        // Grace period (25s) before kicking the player out, giving client time to reconnect
+        console.log(`[ws] Client ${meta.id} in active room ${room.id} disconnected. Starting 25s grace period.`);
+        meta.disconnectedAt = Date.now();
+        broadcastRoom(
+          room,
+          {
+            type: 'player_connection_state',
+            playerId: meta.id,
+            connected: false,
+          },
+          meta.id
+        );
+
+        meta.disconnectTimer = setTimeout(() => {
+          console.log(`[ws] Grace period expired for client ${meta.id} in room ${room.id}.`);
+          leaveCurrentRoom(meta);
+        }, 25000);
+      } else {
+        leaveCurrentRoom(meta);
+      }
     });
   });
 

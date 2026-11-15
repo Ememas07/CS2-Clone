@@ -195,6 +195,12 @@ export interface HudSnapshot {
     headshot: boolean;
     reward: number;
   } | null;
+  deathInfo?: {
+    killerName: string;
+    weaponName: string;
+    headshot: boolean;
+  } | null;
+  pingMs?: number;
   interactPrompt: string | null;
   killFeed: KillFeedEntry[];
   radarBlips: RadarBlip[];

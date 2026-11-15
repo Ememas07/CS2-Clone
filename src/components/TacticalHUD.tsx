@@ -403,6 +403,7 @@ export function TacticalHUD({
               <div className="text-[10px] uppercase tracking-wider text-slate-400">
                 R{hud.roundNumber}/{hud.maxRounds} ·{' '}
                 {hud.phase === 'buy' ? 'BUY' : hud.phase === 'planted' ? 'PLANTED' : 'LIVE'}
+                {hud.pingMs !== undefined && hud.pingMs > 0 && ` · ${hud.pingMs}ms`}
               </div>
             </div>
 
@@ -588,32 +589,52 @@ export function TacticalHUD({
         )}
 
         {!hud.localAlive && (
-          <div
-            className={`px-4 py-2 bg-[#0b0e14]/92 border rounded text-center ${
-              hud.mode === 'spectate' ? 'border-amber-400/40' : 'border-rose-500/40'
-            }`}
-          >
+          <div className="flex flex-col items-center gap-2">
+            {hud.deathInfo && (
+              <div className="px-5 py-2.5 bg-[#0b0e14]/95 border border-rose-500/60 rounded-md text-center shadow-xl backdrop-blur-sm">
+                <div className="text-[10px] font-bold uppercase tracking-widest text-rose-400">
+                  Eliminated In Action
+                </div>
+                <div className="text-sm font-extrabold text-white mt-0.5">
+                  by <span className="text-amber-400">{hud.deathInfo.killerName}</span>
+                </div>
+                <div className="text-[11px] text-slate-300 mt-0.5 flex items-center justify-center gap-1.5 font-tactical-mono">
+                  <span>{hud.deathInfo.weaponName}</span>
+                  {hud.deathInfo.headshot && (
+                    <span className="text-[9px] px-1.5 py-0.2 bg-rose-900/80 text-rose-300 rounded font-bold border border-rose-500/50">
+                      HEADSHOT
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
             <div
-              className={`text-xs font-bold uppercase tracking-wider ${
-                hud.mode === 'spectate' ? 'text-amber-300' : 'text-rose-300'
+              className={`px-4 py-2 bg-[#0b0e14]/92 border rounded text-center shadow ${
+                hud.mode === 'spectate' ? 'border-amber-400/40' : 'border-rose-500/40'
               }`}
             >
-              {hud.mode === 'spectate'
-                ? hud.spectatingName
-                  ? `Spectating 5v5 Bots: ${hud.spectatingName} (${
-                      hud.spectatingTeam === 'attackers' ? 'ATK' : 'DEF'
-                    })`
-                  : 'Spectating 5v5 Bots — Free Camera'
-                : hud.spectatingName
-                  ? `Spectating: ${hud.spectatingName}`
-                  : 'Eliminated — Free Camera'}
-            </div>
-            <div className="text-[11px] text-slate-300 mt-0.5">
-              LMB / Space Next · RMB Prev
-              {hud.spectatingCanControl && (
-                <span className="text-amber-300 font-semibold"> · [E] Take Control</span>
-              )}
-              {hud.mode === 'spectate' && ' · X X-Ray · Tab Scoreboard · Esc Pause'}
+              <div
+                className={`text-xs font-bold uppercase tracking-wider ${
+                  hud.mode === 'spectate' ? 'text-amber-300' : 'text-rose-300'
+                }`}
+              >
+                {hud.mode === 'spectate'
+                  ? hud.spectatingName
+                    ? `Spectating 5v5 Bots: ${hud.spectatingName} (${
+                        hud.spectatingTeam === 'attackers' ? 'ATK' : 'DEF'
+                      })`
+                    : 'Spectating 5v5 Bots — Free Camera'
+                  : hud.spectatingName
+                    ? `Spectating Ally: ${hud.spectatingName}`
+                    : 'Free Death Camera'}
+              </div>
+              <div className="text-[11px] text-slate-300 mt-0.5">
+                {hud.spectatingName ? 'LMB / Space Next Ally · RMB Prev' : 'Mouse to orbit view'}
+                {hud.spectatingCanControl && (
+                  <span className="text-amber-300 font-semibold"> · [E] Take Control</span>
+                )}
+                {hud.mode === 'spectate' && ' · X X-Ray · Tab Scoreboard · Esc Pause'}
+              </div>
             </div>
           </div>
         )}
