@@ -3,6 +3,7 @@ import {
   findWaypointPath,
   getPlantSiteAt,
   hasLineOfSight,
+  raycastMapBoxes,
   SITE_ZONES,
   WAYPOINT_MAP,
   WAYPOINTS,
@@ -30,6 +31,8 @@ export interface BotBrainState {
   pathIndex: number;
   reactionCooldown: number;
   fireCooldown: number;
+  reloadTimer: number;
+  reloadingSlot: 1 | 2 | null;
   strafeDir: number;
   strafeTimer: number;
   nadeCooldown: number;
@@ -37,9 +40,20 @@ export interface BotBrainState {
   lastX: number;
   lastZ: number;
   stuckTimer: number;
+  stuckSkipCount: number;
   unstuckTimer: number;
   unstuckDir: number;
   holdTimer: number;
+  // Advanced vision & threat memory
+  lastSeenEnemyId: string | null;
+  lastSeenX: number;
+  lastSeenY: number;
+  lastSeenZ: number;
+  memoryTimer: number;
+  alertX: number;
+  alertZ: number;
+  alertTimer: number;
+  alertUrgency: number;
 }
 
 export interface BotActionCommand {
@@ -48,7 +62,8 @@ export interface BotActionCommand {
   targetYaw: number;
   targetPitch: number;
   wantFire: boolean;
-  wantReload: boolean;
+  startedReload: boolean;
+  completedReload: boolean;
   wantPlant: boolean;
   wantDefuse: boolean;
   throwGrenade: 'smoke' | 'flashbang' | 'he' | null;
@@ -68,7 +83,14 @@ export function normalizeBotDifficulty(
 // Slider 100 (Max) matches the original lethal bot tuning; lower values give approachable reaction/spread/cadence.
 export function getBotDifficultyTuning(
   difficulty: BotDifficulty | 'easy' | 'medium' | 'hard'
-): { reaction: number; aimJitter: number; fireIntervalMul: number; aggroRange: number } {
+): {
+  reaction: number;
+  aimJitter: number;
+  fireIntervalMul: number;
+  aggroRange: number;
+  fovHalfCos: number;
+  turnSpeed: number;
+} {
   const level = normalizeBotDifficulty(difficulty);
   const t = (level - 1) / 99;
   return {
@@ -76,6 +98,9 @@ export function getBotDifficultyTuning(
     aimJitter: 0.16 - t * (0.16 - 0.036),
     fireIntervalMul: 2.8 - t * (2.8 - 1.15),
     aggroRange: 26 + t * (48 - 26),
+    // ~105 deg at low difficulty up to ~128 deg at max difficulty
+    fovHalfCos: Math.cos((52 + t * 12) * (Math.PI / 180)),
+    turnSpeed: 5.5 + t * 5.5,
   };
 }
 
@@ -90,6 +115,8 @@ export function createBotBrain(actorId: string, index: number): BotBrainState {
     pathIndex: 0,
     reactionCooldown: 0.2,
     fireCooldown: 0,
+    reloadTimer: 0,
+    reloadingSlot: null,
     strafeDir: index % 2 === 0 ? 1 : -1,
     strafeTimer: 1.0,
     nadeCooldown: 4 + (index % 3) * 2,
@@ -97,10 +124,109 @@ export function createBotBrain(actorId: string, index: number): BotBrainState {
     lastX: 0,
     lastZ: 0,
     stuckTimer: 0,
+    stuckSkipCount: 0,
     unstuckTimer: 0,
     unstuckDir: index % 2 === 0 ? 1 : -1,
     holdTimer: 0,
+    lastSeenEnemyId: null,
+    lastSeenX: 0,
+    lastSeenY: 0,
+    lastSeenZ: 0,
+    memoryTimer: 0,
+    alertX: 0,
+    alertZ: 0,
+    alertTimer: 0,
+    alertUrgency: 0,
   };
+}
+
+export function notifyBotThreat(
+  brain: BotBrainState,
+  threatX: number,
+  threatZ: number,
+  urgency = 1.0
+): void {
+  if (brain.alertTimer <= 0 || urgency >= brain.alertUrgency) {
+    brain.alertX = threatX;
+    brain.alertZ = threatZ;
+    brain.alertUrgency = urgency;
+  }
+  brain.alertTimer = Math.max(brain.alertTimer, urgency > 1.2 ? 2.6 : 1.7);
+}
+
+export interface VisionScanResult {
+  enemy: ActorState;
+  dist: number;
+  aimY: number;
+  alignmentCos: number; // dot product between bot look dir and dir to enemy
+  headVisible: boolean;
+  chestVisible: boolean;
+}
+
+export function evaluateBotVision(params: {
+  bot: Pick<ActorState, 'x' | 'y' | 'z' | 'yaw' | 'crouching' | 'team' | 'blindTimer'>;
+  allActors: ReadonlyArray<ActorState>;
+  smokes: Array<{ x: number; y: number; z: number; radius: number }>;
+  aggroRange: number;
+  fovHalfCos: number;
+}): VisionScanResult | null {
+  const { bot, allActors, smokes, aggroRange, fovHalfCos } = params;
+  if (bot.blindTimer > 0.2) return null;
+
+  const eyeY = bot.y + (bot.crouching ? 1.08 : 1.55);
+  const lookX = -Math.sin(bot.yaw);
+  const lookZ = -Math.cos(bot.yaw);
+
+  let best: VisionScanResult | null = null;
+  let bestScore = Infinity;
+
+  for (const other of allActors) {
+    if (!other.alive || other.team === bot.team) continue;
+    const dx = other.x - bot.x;
+    const dz = other.z - bot.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > aggroRange) continue;
+
+    const invD = dist > 0.01 ? 1 / dist : 1;
+    const cosAng = dist < 0.2 ? 1 : (dx * lookX + dz * lookZ) * invD;
+
+    // Close-quarters peripheral awareness within 5.5m (~165 deg cone), otherwise realistic FOV cone
+    const effectiveMinCos = dist < 5.5 ? -0.15 : fovHalfCos;
+    if (cosAng < effectiveMinCos) continue;
+
+    const headY = other.y + (other.crouching ? 1.08 : 1.62);
+    const chestY = other.y + (other.crouching ? 0.72 : 1.15);
+
+    const headVisible = hasLineOfSight(bot.x, eyeY, bot.z, other.x, headY, other.z, smokes);
+    const chestVisible = hasLineOfSight(bot.x, eyeY, bot.z, other.x, chestY, other.z, smokes);
+    if (!headVisible && !chestVisible) continue;
+
+    // Prioritize close + centered + torso-exposed targets
+    const aimY = chestVisible ? (headVisible ? chestY + (headY - chestY) * 0.45 : chestY) : headY;
+    const score = dist * (1.25 - Math.max(0, cosAng) * 0.35);
+    if (score < bestScore) {
+      bestScore = score;
+      best = {
+        enemy: other,
+        dist,
+        aimY,
+        alignmentCos: cosAng,
+        headVisible,
+        chestVisible,
+      };
+    }
+  }
+
+  return best;
+}
+
+function stepYawTowards(currentYaw: number, targetYaw: number, maxStep: number): number {
+  let diff = Math.atan2(Math.sin(targetYaw - currentYaw), Math.cos(targetYaw - currentYaw));
+  if (Math.abs(diff) <= maxStep) return targetYaw;
+  return Math.atan2(
+    Math.sin(currentYaw + Math.sign(diff) * maxStep),
+    Math.cos(currentYaw + Math.sign(diff) * maxStep)
+  );
 }
 
 export function performBotBuyPhase(actor: ActorState, index: number): void {
@@ -148,6 +274,16 @@ export function performBotBuyPhase(actor: ActorState, index: number): void {
     }
   }
 
+  if (
+    actor.team === 'defenders' &&
+    !actor.hasDefuseKit &&
+    actor.cash >= ECONOMY_CONSTANTS.DEFUSE_KIT_PRICE &&
+    (index % 2 === 0 || actor.primary !== null)
+  ) {
+    actor.cash -= ECONOMY_CONSTANTS.DEFUSE_KIT_PRICE;
+    actor.hasDefuseKit = true;
+  }
+
   if (!actor.primary && actor.cash >= 700) {
     const sec: SecondaryWeaponId =
       actor.cash >= 900 ? 'deagle' : actor.team === 'attackers' ? 'tec9' : 'fiveseven';
@@ -172,18 +308,58 @@ export function performBotBuyPhase(actor: ActorState, index: number): void {
   actor.activeSlot = actor.primary ? 1 : 2;
 }
 
+function hasBotClearance(x1: number, z1: number, x2: number, z2: number): boolean {
+  const dx = x2 - x1;
+  const dz = z2 - z1;
+  const dist = Math.hypot(dx, dz);
+  if (dist < 0.25) return true;
+  if (!hasLineOfSight(x1, 0.9, z1, x2, 0.9, z2, [])) return false;
+  const px = (-dz / dist) * 0.42;
+  const pz = (dx / dist) * 0.42;
+  return (
+    hasLineOfSight(x1 + px, 0.9, z1 + pz, x2 + px, 0.9, z2 + pz, []) &&
+    hasLineOfSight(x1 - px, 0.9, z1 - pz, x2 - px, 0.9, z2 - pz, [])
+  );
+}
+
 function pickStartWaypointId(x: number, z: number): string {
-  // Prefer the closest waypoint with clear line of sight so bots never try to walk through a divider wall
   let bestVisId: string | null = null;
   let bestVisDist = Infinity;
+  let fallbackVisId: string | null = null;
+  let fallbackDist = Infinity;
+
   for (const w of WAYPOINTS) {
     const d2 = (w.x - x) * (w.x - x) + (w.z - z) * (w.z - z);
-    if (d2 < bestVisDist && hasLineOfSight(x, 0.9, z, w.x, 0.9, w.z, [])) {
+    if (d2 < bestVisDist && hasBotClearance(x, z, w.x, w.z)) {
       bestVisDist = d2;
       bestVisId = w.id;
+    } else if (d2 < fallbackDist && hasLineOfSight(x, 0.9, z, w.x, 0.9, w.z, [])) {
+      fallbackDist = d2;
+      fallbackVisId = w.id;
     }
   }
-  return bestVisId ?? findNearestWaypoint(x, z).id;
+  return bestVisId ?? fallbackVisId ?? findNearestWaypoint(x, z).id;
+}
+
+function pickBestUnstuckDir(botX: number, botZ: number, moveDx: number, moveDz: number, fallback: number): number {
+  const len = Math.hypot(moveDx, moveDz) || 1;
+  const fx = moveDx / len;
+  const fz = moveDz / len;
+  const lx = -fz;
+  const lz = fx;
+
+  const probe = (sx: number, sz: number): number => {
+    const dLen = Math.hypot(sx, sz) || 1;
+    const hit = raycastMapBoxes(botX, 0.85, botZ, sx / dLen, 0, sz / dLen, 3.2);
+    return hit ? hit.distance : 3.2;
+  };
+
+  const leftSpace = probe(fx * 0.4 + lx * 0.9, fz * 0.4 + lz * 0.9);
+  const rightSpace = probe(fx * 0.4 - lx * 0.9, fz * 0.4 - lz * 0.9);
+  if (Math.abs(leftSpace - rightSpace) > 0.35) {
+    return leftSpace > rightSpace ? 1 : -1;
+  }
+  return fallback;
 }
 
 export function stepBotBrain(params: {
@@ -195,55 +371,88 @@ export function stepBotBrain(params: {
   difficulty: BotDifficulty;
   isBuyPhase: boolean;
   dt: number;
+  legacyVision?: boolean;
 }): BotActionCommand {
-  const { bot, brain, allActors, bomb, smokes, difficulty, isBuyPhase, dt } = params;
+  const {
+    bot,
+    brain,
+    allActors,
+    bomb,
+    smokes,
+    difficulty,
+    isBuyPhase,
+    dt,
+    legacyVision = false,
+  } = params;
   const tuning = getBotDifficultyTuning(difficulty);
 
   brain.fireCooldown = Math.max(0, brain.fireCooldown - dt);
   brain.nadeCooldown = Math.max(0, brain.nadeCooldown - dt);
   brain.unstuckTimer = Math.max(0, brain.unstuckTimer - dt);
+  brain.memoryTimer = Math.max(0, brain.memoryTimer - dt);
+  brain.alertTimer = Math.max(0, brain.alertTimer - dt);
   brain.strafeTimer -= dt;
   if (brain.strafeTimer <= 0) {
     brain.strafeTimer = 0.7 + Math.random() * 0.9;
     brain.strafeDir = Math.random() > 0.5 ? 1 : -1;
   }
 
+  let completedReload = false;
+  let startedReload = false;
+  if (brain.reloadTimer > 0) {
+    brain.reloadTimer = Math.max(0, brain.reloadTimer - dt);
+    if (brain.reloadTimer <= 0) {
+      completedReload = true;
+    }
+  }
+
   if (isBuyPhase) {
     brain.lastX = bot.x;
     brain.lastZ = bot.z;
     brain.stuckTimer = 0;
+    brain.stuckSkipCount = 0;
     brain.holdTimer = 0;
+    brain.reloadTimer = 0;
+    brain.reloadingSlot = null;
+    brain.memoryTimer = 0;
+    brain.alertTimer = 0;
     return {
       moveX: 0,
       moveZ: 0,
       targetYaw: bot.yaw,
       targetPitch: 0,
       wantFire: false,
-      wantReload: false,
+      startedReload: false,
+      completedReload: false,
       wantPlant: false,
       wantDefuse: false,
       throwGrenade: null,
     };
   }
 
+  const activeSlotNum: 1 | 2 | null =
+    bot.activeSlot === 1 ? 1 : bot.activeSlot === 2 ? 2 : null;
   const activeWeapon =
-    bot.activeSlot === 1 ? bot.primary : bot.activeSlot === 2 ? bot.secondary : null;
-  if (activeWeapon && activeWeapon.mag <= 0) {
-    if (activeWeapon.reserve > 0) {
-      return {
-        moveX: 0,
-        moveZ: 0,
-        targetYaw: bot.yaw,
-        targetPitch: 0,
-        wantFire: false,
-        wantReload: true,
-        wantPlant: false,
-        wantDefuse: false,
-        throwGrenade: null,
-      };
-    } else if (bot.activeSlot === 1 && bot.secondary) {
+    activeSlotNum === 1 ? bot.primary : activeSlotNum === 2 ? bot.secondary : null;
+
+  if (activeWeapon && activeWeapon.mag <= 0 && activeWeapon.reserve <= 0) {
+    if (bot.activeSlot === 1 && bot.secondary && bot.secondary.mag > 0) {
       bot.activeSlot = 2;
+      brain.reloadTimer = 0;
+      brain.reloadingSlot = null;
     }
+  } else if (
+    activeWeapon &&
+    activeSlotNum !== null &&
+    activeWeapon.mag <= 0 &&
+    activeWeapon.reserve > 0 &&
+    brain.reloadTimer <= 0 &&
+    !completedReload
+  ) {
+    const spec = WEAPONS[activeWeapon.id];
+    brain.reloadTimer = spec.reloadTime;
+    brain.reloadingSlot = activeSlotNum;
+    startedReload = true;
   }
 
   if (bot.blindTimer > 0.2) {
@@ -253,36 +462,88 @@ export function stepBotBrain(params: {
       moveZ: Math.cos(wanderYaw) * -3.5,
       targetYaw: wanderYaw,
       targetPitch: 0.1,
-      wantFire: brain.fireCooldown <= 0 && Math.random() < 0.25,
-      wantReload: false,
+      wantFire: brain.reloadTimer <= 0 && brain.fireCooldown <= 0 && Math.random() < 0.22,
+      startedReload,
+      completedReload,
       wantPlant: false,
       wantDefuse: false,
       throwGrenade: null,
     };
   }
 
-  // 1. Scan for visible enemies
-  let visibleEnemy: ActorState | null = null;
-  let visibleDist = Infinity;
-  for (const other of allActors) {
-    if (!other.alive || other.team === bot.team) continue;
-    const dist = Math.hypot(other.x - bot.x, other.z - bot.z);
-    if (dist > tuning.aggroRange) continue;
-    if (
-      hasLineOfSight(
-        bot.x,
-        bot.y + 1.55,
-        bot.z,
-        other.x,
-        other.y + 1.45,
-        other.z,
-        smokes
-      )
-    ) {
-      if (dist < visibleDist) {
-        visibleDist = dist;
-        visibleEnemy = other;
+  // 1. Vision Scan: Legacy (360-deg single ray) vs Tactical (FOV cone + head/chest LOS + memory/audio)
+  let visionHit: VisionScanResult | null = null;
+  if (legacyVision) {
+    let bestLegacyDist = Infinity;
+    for (const other of allActors) {
+      if (!other.alive || other.team === bot.team) continue;
+      const dist = Math.hypot(other.x - bot.x, other.z - bot.z);
+      if (dist > tuning.aggroRange) continue;
+      if (
+        hasLineOfSight(
+          bot.x,
+          bot.y + 1.55,
+          bot.z,
+          other.x,
+          other.y + 1.45,
+          other.z,
+          smokes
+        ) &&
+        dist < bestLegacyDist
+      ) {
+        bestLegacyDist = dist;
+        visionHit = {
+          enemy: other,
+          dist,
+          aimY: other.y + 1.48,
+          alignmentCos: 1,
+          headVisible: true,
+          chestVisible: true,
+        };
       }
+    }
+    brain.memoryTimer = 0;
+    brain.alertTimer = 0;
+  } else {
+    visionHit = evaluateBotVision({
+      bot,
+      allActors,
+      smokes,
+      aggroRange: tuning.aggroRange,
+      fovHalfCos: tuning.fovHalfCos,
+    });
+
+    if (visionHit) {
+      brain.lastSeenEnemyId = visionHit.enemy.id;
+      brain.lastSeenX = visionHit.enemy.x;
+      brain.lastSeenY = visionHit.aimY;
+      brain.lastSeenZ = visionHit.enemy.z;
+      brain.memoryTimer = 2.4;
+      brain.alertTimer = 0;
+    } else if (brain.lastSeenEnemyId) {
+      const prevTarget = allActors.find((a) => a.id === brain.lastSeenEnemyId);
+      if (!prevTarget || !prevTarget.alive) {
+        brain.memoryTimer = 0;
+        brain.lastSeenEnemyId = null;
+      }
+    }
+  }
+
+  // Tactical reload when magazine is low and no immediate visual enemy or threat
+  if (
+    !visionHit &&
+    brain.reloadTimer <= 0 &&
+    !completedReload &&
+    activeWeapon &&
+    activeSlotNum !== null &&
+    activeWeapon.reserve > 0 &&
+    activeWeapon.mag > 0
+  ) {
+    const spec = WEAPONS[activeWeapon.id];
+    if (activeWeapon.mag <= Math.max(2, Math.floor(spec.magSize * 0.22)) && brain.memoryTimer <= 0.4) {
+      brain.reloadTimer = spec.reloadTime;
+      brain.reloadingSlot = activeSlotNum;
+      startedReload = true;
     }
   }
 
@@ -298,7 +559,7 @@ export function stepBotBrain(params: {
       goalId = pickStartWaypointId(bomb.x, bomb.z);
     } else if (bot.hasC4) {
       const onSite = getPlantSiteAt(bot.x, bot.z);
-      if (onSite && !visibleEnemy) {
+      if (onSite && !visionHit && brain.reloadTimer <= 0) {
         wantPlant = true;
       }
       goalId = brain.targetSite === 'A' ? 'a_site' : 'b_site';
@@ -314,7 +575,7 @@ export function stepBotBrain(params: {
     if ((bomb.status === 'planted' || bomb.status === 'defusing') && bomb.site) {
       goalId = bomb.site === 'A' ? 'a_site' : 'b_site';
       const distToBomb = Math.hypot(bomb.x - bot.x, bomb.z - bot.z);
-      if (distToBomb < 2.6 && !visibleEnemy) {
+      if (distToBomb < 2.35 && !visionHit && brain.reloadTimer <= 0) {
         wantDefuse = true;
       }
     } else {
@@ -327,17 +588,18 @@ export function stepBotBrain(params: {
     }
   }
 
-  // Recompute path when goal changes or path is empty
   if (goalId !== brain.lastGoalId || brain.path.length === 0) {
     const startId = pickStartWaypointId(bot.x, bot.z);
     brain.path = findWaypointPath(startId, goalId);
     brain.pathIndex = 0;
     brain.lastGoalId = goalId;
     brain.holdTimer = 0;
+    brain.stuckSkipCount = 0;
   }
 
-  // Combat engagement overrides movement
-  if (visibleEnemy) {
+  // Combat engagement when an enemy is in FOV + LOS
+  if (visionHit) {
+    const visibleEnemy = visionHit.enemy;
     brain.stuckTimer = 0;
     brain.holdTimer = 0;
     brain.lastX = bot.x;
@@ -345,7 +607,8 @@ export function stepBotBrain(params: {
 
     const dx = visibleEnemy.x - bot.x;
     const dz = visibleEnemy.z - bot.z;
-    const dy = visibleEnemy.y + 1.48 - (bot.y + 1.55);
+    const eyeY = bot.y + (bot.crouching ? 1.08 : 1.55);
+    const dy = visionHit.aimY - eyeY;
     const horizDist = Math.max(0.1, Math.hypot(dx, dz));
 
     const idealYaw = Math.atan2(-dx, -dz);
@@ -358,23 +621,40 @@ export function stepBotBrain(params: {
     const spec = WEAPONS[weaponId];
     const interval = (60 / Math.max(40, spec.fireRateRpm)) * tuning.fireIntervalMul;
 
-    brain.reactionCooldown = Math.max(0, brain.reactionCooldown - dt);
-    const canShoot = brain.reactionCooldown <= 0 && brain.fireCooldown <= 0;
+    // Central alignment reacts faster than outer peripheral detection
+    const reactionRate =
+      visionHit.alignmentCos >= 0.9 ? 1.1 : visionHit.alignmentCos >= 0.72 ? 0.85 : 0.6;
+    brain.reactionCooldown = Math.max(0, brain.reactionCooldown - dt * reactionRate);
+
+    const canShoot =
+      brain.reloadTimer <= 0 &&
+      activeWeapon !== null &&
+      activeWeapon.mag > 0 &&
+      brain.reactionCooldown <= 0 &&
+      brain.fireCooldown <= 0;
     if (canShoot) {
       brain.fireCooldown = interval * (0.9 + Math.random() * 0.35);
     }
 
     const perpX = dz / horizDist;
     const perpZ = -dx / horizDist;
-    const strafeSpeed = visibleDist < 10 ? 3.2 : 2.1;
+    const strafeSpeed = brain.reloadTimer > 0 ? 4.2 : visionHit.dist < 10 ? 3.2 : 2.1;
+    // While reloading under fire, back away slightly while strafing instead of freezing
+    const backX = brain.reloadTimer > 0 ? -(dx / horizDist) * 2.2 : 0;
+    const backZ = brain.reloadTimer > 0 ? -(dz / horizDist) * 2.2 : 0;
+
+    const smoothedYaw = legacyVision
+      ? idealYaw
+      : stepYawTowards(bot.yaw, idealYaw, tuning.turnSpeed * 1.45 * dt);
 
     return {
-      moveX: perpX * brain.strafeDir * strafeSpeed,
-      moveZ: perpZ * brain.strafeDir * strafeSpeed,
-      targetYaw: idealYaw + (Math.random() - 0.5) * tuning.aimJitter,
-      targetPitch: idealPitch + (Math.random() - 0.5) * tuning.aimJitter * 0.6,
+      moveX: perpX * brain.strafeDir * strafeSpeed + backX,
+      moveZ: perpZ * brain.strafeDir * strafeSpeed + backZ,
+      targetYaw: smoothedYaw + (canShoot ? (Math.random() - 0.5) * tuning.aimJitter : 0),
+      targetPitch: idealPitch + (canShoot ? (Math.random() - 0.5) * tuning.aimJitter * 0.6 : 0),
       wantFire: canShoot,
-      wantReload: false,
+      startedReload,
+      completedReload,
       wantPlant: false,
       wantDefuse: false,
       throwGrenade: null,
@@ -391,10 +671,11 @@ export function stepBotBrain(params: {
     return {
       moveX: 0,
       moveZ: 0,
-      targetYaw: lookYaw,
+      targetYaw: stepYawTowards(bot.yaw, lookYaw, tuning.turnSpeed * dt),
       targetPitch: -0.3,
       wantFire: false,
-      wantReload: false,
+      startedReload,
+      completedReload,
       wantPlant,
       wantDefuse,
       throwGrenade: null,
@@ -416,7 +697,6 @@ export function stepBotBrain(params: {
 
   if (
     (bomb.status === 'planted' || bomb.status === 'defusing') &&
-    !wantDefuse &&
     bot.team === 'defenders'
   ) {
     const distBomb = Math.hypot(bomb.x - bot.x, bomb.z - bot.z);
@@ -448,9 +728,17 @@ export function stepBotBrain(params: {
   const moveDz = targetZ - bot.z;
   const moveDist = Math.hypot(moveDx, moveDz);
 
-  // If bot reached its hold point, rotate tactically after a short hold so bots never stall permanently
+  // Determine desired gaze yaw: remembered LKP > gunfire/hit threat > movement direction
+  let desiredLookYaw = moveDist > 0.2 ? Math.atan2(-moveDx, -moveDz) : bot.yaw;
+  if (brain.memoryTimer > 0) {
+    desiredLookYaw = Math.atan2(-(brain.lastSeenX - bot.x), -(brain.lastSeenZ - bot.z));
+  } else if (brain.alertTimer > 0) {
+    desiredLookYaw = Math.atan2(-(brain.alertX - bot.x), -(brain.alertZ - bot.z));
+  }
+
   if (moveDist < 0.9) {
     brain.stuckTimer = 0;
+    brain.stuckSkipCount = 0;
     brain.holdTimer += dt;
     brain.lastX = bot.x;
     brain.lastZ = bot.z;
@@ -468,36 +756,60 @@ export function stepBotBrain(params: {
       }
     }
 
-    const holdYaw = bot.team === 'attackers' ? 0 : Math.PI;
+    const baseHoldYaw =
+      brain.memoryTimer > 0 || brain.alertTimer > 0
+        ? desiredLookYaw
+        : bot.team === 'attackers'
+          ? 0
+          : Math.PI;
+    const scanSweep =
+      brain.memoryTimer > 0 || brain.alertTimer > 0
+        ? 0
+        : Math.sin(performance.now() * 0.0012 + bot.x) * 0.45;
     return {
       moveX: 0,
       moveZ: 0,
-      targetYaw: holdYaw + Math.sin(performance.now() * 0.001 + bot.x) * 0.45,
+      targetYaw: stepYawTowards(bot.yaw, baseHoldYaw + scanSweep, tuning.turnSpeed * dt),
       targetPitch: 0,
       wantFire: false,
-      wantReload: false,
+      startedReload,
+      completedReload,
       wantPlant: false,
       wantDefuse: false,
       throwGrenade: null,
     };
   }
 
-  // Stuck detection: if bot wants to move but made < 0.08m progress over 0.7s, sidestep & re-path
+  // Stuck detection: steer cleanly toward clearer side; escalate by advancing/switching route
   const moved = Math.hypot(bot.x - brain.lastX, bot.z - brain.lastZ);
   brain.lastX = bot.x;
   brain.lastZ = bot.z;
   if (moved < 1.2 * dt) {
     brain.stuckTimer += dt;
-    if (brain.stuckTimer > 0.65) {
+    if (brain.stuckTimer > 0.6) {
       brain.stuckTimer = 0;
-      brain.unstuckTimer = 0.65;
-      brain.unstuckDir *= -1;
-      const startId = pickStartWaypointId(bot.x, bot.z);
-      brain.path = findWaypointPath(startId, goalId);
-      brain.pathIndex = brain.path.length > 1 ? 1 : 0;
+      brain.stuckSkipCount++;
+      brain.unstuckTimer = 0.85;
+      brain.unstuckDir = pickBestUnstuckDir(bot.x, bot.z, moveDx, moveDz, brain.unstuckDir);
+
+      if (brain.stuckSkipCount >= 2 && brain.pathIndex < brain.path.length - 1) {
+        brain.pathIndex++;
+        brain.stuckSkipCount = 0;
+      } else {
+        const startId = pickStartWaypointId(bot.x, bot.z);
+        brain.path = findWaypointPath(startId, goalId);
+        const firstWp = WAYPOINT_MAP.get(brain.path[0]);
+        brain.pathIndex =
+          brain.path.length > 1 && firstWp && Math.hypot(firstWp.x - bot.x, firstWp.z - bot.z) < 2.2
+            ? 1
+            : 0;
+      }
     }
   } else {
     brain.stuckTimer = Math.max(0, brain.stuckTimer - dt * 2);
+    if (moved > 3.0 * dt) {
+      brain.stuckSkipCount = 0;
+    }
   }
 
   const speed = 5.8;
@@ -505,24 +817,28 @@ export function stepBotBrain(params: {
   let vz = (moveDz / moveDist) * speed;
 
   if (brain.unstuckTimer > 0) {
-    // Blend perpendicular strafe to slide cleanly around box corners
     const px = -moveDz / moveDist;
     const pz = moveDx / moveDist;
     vx = vx * 0.45 + px * brain.unstuckDir * speed * 0.85;
     vz = vz * 0.45 + pz * brain.unstuckDir * speed * 0.85;
   }
 
-  const moveYaw = Math.atan2(-vx, -vz);
+  const lookTargetYaw =
+    brain.memoryTimer > 0 || brain.alertTimer > 0
+      ? desiredLookYaw
+      : Math.atan2(-vx, -vz);
 
   return {
     moveX: vx,
     moveZ: vz,
-    targetYaw: moveYaw,
+    targetYaw: stepYawTowards(bot.yaw, lookTargetYaw, tuning.turnSpeed * dt),
     targetPitch: 0,
     wantFire: false,
-    wantReload: false,
+    startedReload,
+    completedReload,
     wantPlant: false,
     wantDefuse: false,
     throwGrenade,
   };
 }
+

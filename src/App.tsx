@@ -6,7 +6,20 @@ import { TacticalHUD } from './components/TacticalHUD';
 import { GameEngine, type MatchConfig } from './game/engine';
 import { networkClient } from './game/network';
 import { ROUND_CONSTANTS } from './game/rules';
-import type { ArmorType, HudSnapshot, MapId, WeaponId, WeaponSlot } from './game/types';
+import type { BuyableGearId, HudSnapshot, MapId, WeaponSlot } from './game/types';
+
+function loadInitialSensitivity(): number {
+  try {
+    const raw = window.localStorage.getItem('sandline_sensitivity');
+    const parsed = raw ? Number.parseFloat(raw) : Number.NaN;
+    if (Number.isFinite(parsed)) {
+      return Math.max(0.2, Math.min(3.0, parsed));
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  return 1.0;
+}
 
 export default function App() {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -23,6 +36,8 @@ export default function App() {
   const [hud, setHud] = useState<HudSnapshot | null>(null);
   const [buyMenuOpen, setBuyMenuOpen] = useState(false);
   const [showScoreboard, setShowScoreboard] = useState(false);
+  const [sensitivity, setSensitivity] = useState<number>(loadInitialSensitivity);
+  const initialSensitivityRef = useRef(sensitivity);
 
   const handleStartMatch = useCallback((cfg: MatchConfig) => {
     lastConfigRef.current = cfg;
@@ -49,6 +64,7 @@ export default function App() {
       setShowScoreboard(false);
       engine.setScreen('paused');
     });
+    engine.setSensitivity(initialSensitivityRef.current);
     engineRef.current = engine;
 
     const params = new URLSearchParams(window.location.search);
@@ -130,7 +146,7 @@ export default function App() {
     }
   }, [buyMenuOpen, hud?.canBuy, hud?.localAlive, hud?.screen]);
 
-  const handleBuyItem = useCallback((itemId: WeaponId | ArmorType) => {
+  const handleBuyItem = useCallback((itemId: BuyableGearId) => {
     if (!engineRef.current) return { ok: false, reason: 'Engine unavailable' };
     return engineRef.current.buyWeaponOrItem(itemId);
   }, []);
@@ -141,6 +157,16 @@ export default function App() {
 
   const handleToggleMute = useCallback(() => {
     engineRef.current?.toggleMute();
+  }, []);
+
+  const handleToggleXray = useCallback(() => {
+    engineRef.current?.toggleXray();
+  }, []);
+
+  const handleChangeSensitivity = useCallback((val: number) => {
+    const clamped = Math.max(0.2, Math.min(3.0, Math.round(val * 100) / 100));
+    setSensitivity(clamped);
+    engineRef.current?.setSensitivity(clamped);
   }, []);
 
   const handleToggleFullscreen = useCallback(() => {
@@ -179,7 +205,12 @@ export default function App() {
       <div ref={mountRef} className="fixed inset-0" />
 
       {screen === 'title' && (
-        <MainMenu onStartMatch={handleStartMatch} onPreviewMap={handlePreviewMap} />
+        <MainMenu
+          sensitivity={sensitivity}
+          onChangeSensitivity={handleChangeSensitivity}
+          onStartMatch={handleStartMatch}
+          onPreviewMap={handlePreviewMap}
+        />
       )}
 
       {screen === 'playing' && hud && (
@@ -193,6 +224,7 @@ export default function App() {
           }}
           onSelectSlot={handleSelectSlot}
           onToggleMute={handleToggleMute}
+          onToggleXray={handleToggleXray}
           onToggleFullscreen={handleToggleFullscreen}
           onPause={handlePause}
         />
@@ -212,6 +244,8 @@ export default function App() {
       {(screen === 'paused' || screen === 'gameover') && hud && (
         <StatusModal
           hud={hud}
+          sensitivity={sensitivity}
+          onChangeSensitivity={handleChangeSensitivity}
           onResume={handleResume}
           onRestart={handleRestart}
           onMainMenu={handleMainMenu}

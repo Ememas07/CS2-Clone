@@ -5,6 +5,8 @@ import type { BotDifficulty, GameMode, MapId, RoomInfo, Team } from '../game/typ
 import type { MatchConfig } from '../game/engine';
 
 interface MainMenuProps {
+  sensitivity: number;
+  onChangeSensitivity: (val: number) => void;
   onStartMatch: (config: MatchConfig) => void;
   onPreviewMap: (mapId: MapId) => void;
 }
@@ -16,12 +18,18 @@ function getDifficultyLabel(val: number): string {
   return 'Chill';
 }
 
-export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
+export function MainMenu({
+  sensitivity,
+  onChangeSensitivity,
+  onStartMatch,
+  onPreviewMap,
+}: MainMenuProps) {
   const [mode, setMode] = useState<GameMode>('bots');
   const [mapId, setMapId] = useState<MapId>('sandline');
   const [playerName, setPlayerName] = useState('Operator');
   const [playerTeam, setPlayerTeam] = useState<Team>('attackers');
   const [difficulty, setDifficulty] = useState<BotDifficulty>(55);
+  const [legacyBots, setLegacyBots] = useState(false);
   const [maxRounds, setMaxRounds] = useState<number>(12);
 
   // Multiplayer Lobby State
@@ -57,12 +65,13 @@ export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
           playerName: me?.name ?? playerName,
           difficulty: r.botDifficulty,
           maxRounds,
+          legacyBots,
           room: r,
           localClientId: yourId ?? networkClient.clientId,
         });
       },
     });
-  }, [maxRounds, onPreviewMap, onStartMatch, playerName, playerTeam, yourId]);
+  }, [legacyBots, maxRounds, onPreviewMap, onStartMatch, playerName, playerTeam, yourId]);
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
@@ -78,12 +87,13 @@ export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
           playerName: playerName.trim() || 'Operator',
           difficulty,
           maxRounds,
+          legacyBots,
         });
       }
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [difficulty, mapId, maxRounds, mode, onStartMatch, playerName, playerTeam]);
+  }, [difficulty, legacyBots, mapId, maxRounds, mode, onStartMatch, playerName, playerTeam]);
 
   const handleSelectMap = (id: MapId) => {
     setMapId(id);
@@ -303,6 +313,60 @@ export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
               </div>
 
               <div>
+                <div className="flex items-center justify-between text-xs mb-1">
+                  <span className="font-medium text-slate-300">Bot Vision</span>
+                  <span className="text-[11px] text-slate-400">
+                    {legacyBots ? '360° Classic Snap' : 'FOV + Threat Memory'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-1 bg-[#0b0e14] p-1 rounded border border-white/15">
+                  <button
+                    type="button"
+                    onClick={() => setLegacyBots(false)}
+                    className={`py-1.5 text-xs font-semibold rounded transition-colors ${
+                      !legacyBots
+                        ? 'bg-emerald-500 text-slate-950'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Tactical Vision
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLegacyBots(true)}
+                    className={`py-1.5 text-xs font-semibold rounded transition-colors ${
+                      legacyBots
+                        ? 'bg-amber-500 text-slate-950'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Legacy Bots
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between text-xs mb-1">
+                  <label htmlFor="menu-sensitivity-slider" className="font-medium text-slate-300">
+                    Mouse Sensitivity
+                  </label>
+                  <span className="font-tactical-mono text-sky-300 font-semibold">
+                    {sensitivity.toFixed(2)}x
+                  </span>
+                </div>
+                <input
+                  id="menu-sensitivity-slider"
+                  type="range"
+                  min={0.2}
+                  max={3.0}
+                  step={0.05}
+                  value={sensitivity}
+                  onChange={(e) => onChangeSensitivity(Number(e.target.value))}
+                  className="w-full accent-sky-400 cursor-pointer"
+                />
+              </div>
+
+              <div>
                 <span className="block text-xs font-medium text-slate-300 mb-1">
                   Match Format
                 </span>
@@ -338,6 +402,7 @@ export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
                     playerName: playerName.trim() || 'Operator',
                     difficulty,
                     maxRounds,
+                    legacyBots,
                   })
                 }
                 className="w-full py-3 px-5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm uppercase tracking-wider rounded transition-colors"
@@ -375,26 +440,73 @@ export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
               </div>
 
               {mode === 'mixed' && (
-                <div>
-                  <div className="flex items-center justify-between text-xs mb-1">
-                    <label htmlFor="mixed-difficulty-slider" className="font-medium text-slate-300">
-                      Fill Bot Difficulty (5v5)
-                    </label>
-                    <span className="font-tactical-mono text-amber-300 font-semibold">
-                      {difficulty} / 100 · {getDifficultyLabel(difficulty)}
-                    </span>
+                <div className="space-y-2.5">
+                  <div>
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <label htmlFor="mixed-difficulty-slider" className="font-medium text-slate-300">
+                        Fill Bot Difficulty (5v5)
+                      </label>
+                      <span className="font-tactical-mono text-amber-300 font-semibold">
+                        {difficulty} / 100 · {getDifficultyLabel(difficulty)}
+                      </span>
+                    </div>
+                    <input
+                      id="mixed-difficulty-slider"
+                      type="range"
+                      min={1}
+                      max={100}
+                      value={difficulty}
+                      onChange={(e) => setDifficulty(Number(e.target.value))}
+                      className="w-full accent-amber-500 cursor-pointer"
+                    />
                   </div>
-                  <input
-                    id="mixed-difficulty-slider"
-                    type="range"
-                    min={1}
-                    max={100}
-                    value={difficulty}
-                    onChange={(e) => setDifficulty(Number(e.target.value))}
-                    className="w-full accent-amber-500 cursor-pointer"
-                  />
+                  <div className="grid grid-cols-2 gap-1 bg-[#0b0e14] p-1 rounded border border-white/15">
+                    <button
+                      type="button"
+                      onClick={() => setLegacyBots(false)}
+                      className={`py-1 text-xs font-semibold rounded transition-colors ${
+                        !legacyBots
+                          ? 'bg-emerald-500 text-slate-950'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Tactical Vision
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLegacyBots(true)}
+                      className={`py-1 text-xs font-semibold rounded transition-colors ${
+                        legacyBots
+                          ? 'bg-amber-500 text-slate-950'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Legacy Bots
+                    </button>
+                  </div>
                 </div>
               )}
+
+              <div>
+                <div className="flex items-center justify-between text-xs mb-1">
+                  <label htmlFor="pvp-sensitivity-slider" className="font-medium text-slate-300">
+                    Mouse Sensitivity
+                  </label>
+                  <span className="font-tactical-mono text-sky-300 font-semibold">
+                    {sensitivity.toFixed(2)}x
+                  </span>
+                </div>
+                <input
+                  id="pvp-sensitivity-slider"
+                  type="range"
+                  min={0.2}
+                  max={3.0}
+                  step={0.05}
+                  value={sensitivity}
+                  onChange={(e) => onChangeSensitivity(Number(e.target.value))}
+                  className="w-full accent-sky-400 cursor-pointer"
+                />
+              </div>
 
               {!room ? (
                 <div className="space-y-2 pt-1">

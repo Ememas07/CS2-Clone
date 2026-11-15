@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { ECONOMY_CONSTANTS } from '../game/rules';
-import type { ArmorType, HudSnapshot, WeaponId } from '../game/types';
+import type { BuyableGearId, HudSnapshot, WeaponId } from '../game/types';
 import { KNIFE_IDS, WEAPONS } from '../game/weapons';
 
 interface BuyMenuProps {
   hud: HudSnapshot;
-  onBuy: (itemId: WeaponId | ArmorType) => { ok: boolean; reason?: string };
+  onBuy: (itemId: BuyableGearId) => { ok: boolean; reason?: string };
   onClose: () => void;
 }
 
@@ -16,7 +16,7 @@ const GRENADE_ORDER: WeaponId[] = ['flashbang', 'he', 'smoke', 'molotov', 'incen
 export function BuyMenu({ hud, onBuy, onClose }: BuyMenuProps) {
   const [feedback, setFeedback] = useState<{ text: string; ok: boolean } | null>(null);
 
-  const handlePurchase = (id: WeaponId | ArmorType, label: string) => {
+  const handlePurchase = (id: BuyableGearId, label: string) => {
     const res = onBuy(id);
     if (res.ok) {
       setFeedback({ text: `Equipped ${label}`, ok: true });
@@ -145,6 +145,33 @@ export function BuyMenu({ hud, onBuy, onClose }: BuyMenuProps) {
                     Survives starter pistol & SMG headshots.
                   </p>
                 </button>
+
+                {hud.localTeam === 'defenders' && (
+                  <button
+                    type="button"
+                    disabled={!canBuyPhase || hud.hasDefuseKit}
+                    onClick={() => handlePurchase('defuse_kit', 'Defuse Kit')}
+                    className="w-full text-left p-2.5 rounded border border-white/10 bg-[#0b0e14] hover:border-amber-400/60 disabled:opacity-50 transition-colors"
+                  >
+                    <div className="flex items-center justify-between text-sm font-semibold">
+                      <span>Defuse Kit</span>
+                      <span
+                        className={`tabular-nums ${
+                          hud.hasDefuseKit
+                            ? 'text-amber-300'
+                            : hud.cash >= ECONOMY_CONSTANTS.DEFUSE_KIT_PRICE
+                              ? 'text-emerald-400'
+                              : 'text-rose-400'
+                        }`}
+                      >
+                        {hud.hasDefuseKit ? 'EQUIPPED' : `$${ECONOMY_CONSTANTS.DEFUSE_KIT_PRICE}`}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Cuts C4 defusal time from 10s to 5s.
+                    </p>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -334,6 +361,7 @@ export function BuyMenu({ hud, onBuy, onClose }: BuyMenuProps) {
             {hud.secondaryId ? WEAPONS[hud.secondaryId].name : 'No Pistol'} ·{' '}
             {WEAPONS[hud.knifeId].name} · Armor {hud.armor}
             {hud.hasHelmet ? ' + Helmet' : ''}
+            {hud.hasDefuseKit ? ' · Defuse Kit' : ''}
           </span>
           {feedback && (
             <span className={feedback.ok ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>

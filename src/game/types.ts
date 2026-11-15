@@ -12,6 +12,7 @@ export type KnifeId = 'bayonet' | 'karambit' | 'butterfly';
 export type GrenadeId = 'flashbang' | 'he' | 'smoke' | 'molotov' | 'incendiary';
 export type WeaponId = PrimaryWeaponId | SecondaryWeaponId | KnifeId | GrenadeId | 'c4';
 export type ArmorType = 'none' | 'kevlar' | 'kevlar_helmet';
+export type BuyableGearId = WeaponId | ArmorType | 'defuse_kit';
 export type HitboxZone = 'head' | 'chest' | 'limb';
 
 export type RoundPhase = 'buy' | 'live' | 'planted' | 'round_end' | 'match_end';
@@ -76,12 +77,14 @@ export interface ActorState {
   yaw: number;
   pitch: number;
   crouching: boolean;
+  grounded: boolean;
   activeSlot: WeaponSlot;
   primary: WeaponInstance | null;
   secondary: WeaponInstance | null;
   knife: KnifeId;
   grenades: GrenadeId[];
   hasC4: boolean;
+  hasDefuseKit: boolean;
   blindTimer: number; // seconds remaining of flashbang blindness
   inBuyZone: boolean;
   hurtFlash: number;
@@ -123,6 +126,24 @@ export interface RadarBlip {
   alive: boolean;
 }
 
+export interface TeammateOverlay {
+  id: string;
+  name: string;
+  team: Team;
+  hp: number;
+  armor: number;
+  primaryName: string | null;
+  secondaryName: string | null;
+  activeWeaponName: string;
+  hasC4: boolean;
+  hasDefuseKit: boolean;
+  grenadeCount: number;
+  isReloading: boolean;
+  xPct: number;
+  yPct: number;
+  dist: number;
+}
+
 export interface HudSnapshot {
   screen: AppScreen;
   mode: GameMode;
@@ -161,6 +182,7 @@ export interface HudSnapshot {
   knifeId: KnifeId;
   grenades: GrenadeId[];
   hasC4: boolean;
+  hasDefuseKit: boolean;
   bomb: BombState;
   crosshairSpread: number; // pixels radius
   blindAlpha: number; // 0..1
@@ -176,6 +198,8 @@ export interface HudSnapshot {
   interactPrompt: string | null;
   killFeed: KillFeedEntry[];
   radarBlips: RadarBlip[];
+  teammateOverlays: TeammateOverlay[];
+  xrayEnabled: boolean;
   localYaw: number;
   localX: number;
   localZ: number;

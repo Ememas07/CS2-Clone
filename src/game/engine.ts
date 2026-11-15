@@ -5,6 +5,7 @@ import { soundEngine, type VoicelineEvent } from './audio';
 import {
   type BotBrainState,
   createBotBrain,
+  notifyBotThreat,
   performBotBuyPhase,
   stepBotBrain,
 } from './botAI';
@@ -31,6 +32,7 @@ import {
   calculateBulletDamage,
   calculateHeExplosionDamage,
   canBuyWeapon,
+  canPickUpGrenade,
   canPlantBombNow,
   checkMatchWinner,
   clampCash,
@@ -38,17 +40,19 @@ import {
   computeWeaponSpread,
   ECONOMY_CONSTANTS,
   getArmorPurchaseCost,
+  getDefuseDurationSeconds,
   getKillReward,
   isHalftimeRound,
   ROUND_CONSTANTS,
+  selectDeathDrops,
 } from './rules';
 import { createProceduralMaterials, type ProceduralMaterialSet } from './textures';
 import type {
   ActorState,
   AppScreen,
-  ArmorType,
   BombState,
   BotDifficulty,
+  BuyableGearId,
   GameMode,
   GrenadeId,
   HudSnapshot,
@@ -60,6 +64,7 @@ import type {
   RoundPhase,
   SecondaryWeaponId,
   Team,
+  TeammateOverlay,
   WeaponId,
   WeaponSlot,
 } from './types';
@@ -102,15 +107,19 @@ interface ActiveFire {
   group: THREE.Group;
 }
 
-interface DroppedWeapon {
+interface DroppedPickup {
   id: number;
-  weaponId: PrimaryWeaponId;
-  mag: number;
-  reserve: number;
+  kind: 'weapon' | 'grenade' | 'kit';
+  weaponId?: PrimaryWeaponId | SecondaryWeaponId;
+  grenadeId?: GrenadeId;
+  mag?: number;
+  reserve?: number;
   x: number;
   y: number;
   z: number;
-  mesh: THREE.Mesh;
+  pickupCooldown: number;
+  dropperId: string | null;
+  mesh: THREE.Group;
 }
 
 interface TracerSlot {
@@ -127,6 +136,7 @@ export interface MatchConfig {
   playerName: string;
   difficulty: BotDifficulty;
   maxRounds: number;
+  legacyBots?: boolean;
   room?: RoomInfo | null;
   localClientId?: string | null;
 }
@@ -191,7 +201,7 @@ export class GameEngine {
   private equipAnimTimer = 0;
   private equipAnimDuration = 0.3;
   private awpBoltTimer = 0;
-  private readonly awpBoltDuration = 1.15;
+  private readonly awpBoltDuration = 1.24;
   private awpShellEjected = false;
   private reloadTimer = 0;
   private fireCooldown = 0;
@@ -224,6 +234,8 @@ export class GameEngine {
   private localActorId = 'local';
   private controllingBotId: string | null = null;
   private lastRoundStartVoiceRound = 0;
+  private mouseSensitivity = 1.0;
+  private xrayEnabled = true;
 
   private roundNumber = 1;
   private attackerScore = 0;
@@ -248,11 +260,13 @@ export class GameEngine {
     defuserId: null,
   };
   private bombBeepAccum = 0;
+  private c4PickupCooldown = 0;
+  private c4DropperId: string | null = null;
 
   private activeGrenades: ActiveGrenade[] = [];
   private activeSmokes: ActiveSmoke[] = [];
   private activeFires: ActiveFire[] = [];
-  private droppedWeapons: DroppedWeapon[] = [];
+  private droppedPickups: DroppedPickup[] = [];
   private nextEntityUid = 1;
 
   private killFeed: KillFeedEntry[] = [];
@@ -285,6 +299,17 @@ export class GameEngine {
   constructor(container: HTMLElement, onHudUpdate: (snapshot: HudSnapshot) => void) {
     this.container = container;
     this.onHudUpdate = onHudUpdate;
+    try {
+      const saved = localStorage.getItem('sandline_sensitivity');
+      if (saved !== null) {
+        const parsed = Number(saved);
+        if (Number.isFinite(parsed)) {
+          this.mouseSensitivity = Math.min(3.0, Math.max(0.2, parsed));
+        }
+      }
+    } catch {
+      // ignore storage failure
+    }
     this.initThree();
     this.buildStaticMap();
     this.loadMap(this.config.mapId);
@@ -292,6 +317,28 @@ export class GameEngine {
     this.setupNetworkListeners();
     this.emitHud(true);
     this.startLoop();
+  }
+
+  public setSensitivity(val: number): void {
+    if (!Number.isFinite(val)) return;
+    this.mouseSensitivity = Math.min(3.0, Math.max(0.2, Math.round(val * 100) / 100));
+    try {
+      localStorage.setItem('sandline_sensitivity', String(this.mouseSensitivity));
+    } catch {
+      // ignore storage failure
+    }
+  }
+
+  public getSensitivity(): number {
+    return this.mouseSensitivity;
+  }
+
+  public toggleXray(): boolean {
+    if (this.config.mode !== 'spectate') return false;
+    this.xrayEnabled = !this.xrayEnabled;
+    soundEngine.playUiTick(this.xrayEnabled ? 860 : 540);
+    this.emitHud(true);
+    return this.xrayEnabled;
   }
 
   private initThree(): void {
@@ -769,6 +816,7 @@ export class GameEngine {
             'KeyR',
             'KeyF',
             'KeyG',
+            'KeyX',
             'KeyB',
             'KeyC',
             'KeyM',
@@ -809,7 +857,8 @@ export class GameEngine {
 
     const mx = THREE.MathUtils.clamp(e.movementX, -120, 120);
     const my = THREE.MathUtils.clamp(e.movementY, -120, 120);
-    const sens = this.scopeZoom === 2 ? 0.0007 : this.scopeZoom === 1 ? 0.0012 : 0.0022;
+    const baseSens = this.scopeZoom === 2 ? 0.0007 : this.scopeZoom === 1 ? 0.0012 : 0.0022;
+    const sens = baseSens * this.mouseSensitivity;
     const rawYaw = local.yaw - mx * sens;
     local.yaw = Math.atan2(Math.sin(rawYaw), Math.cos(rawYaw));
     local.pitch = THREE.MathUtils.clamp(
@@ -892,6 +941,8 @@ export class GameEngine {
           this.cycleSpectateTarget(1);
         } else if (code === 'ArrowLeft') {
           this.cycleSpectateTarget(-1);
+        } else if (code === 'KeyX') {
+          this.toggleXray();
         }
       }
       return;
@@ -936,7 +987,9 @@ export class GameEngine {
         this.inspectTimer = 1.45;
         soundEngine.playUiTick(520);
       } else if (code === 'KeyG') {
-        this.dropPrimaryWeapon(local);
+        this.dropActiveItem(local);
+      } else if (code === 'KeyE') {
+        this.tryInteractPickup(local);
       }
     }
   };
@@ -965,7 +1018,7 @@ export class GameEngine {
     const spec = WEAPONS[weaponId];
     this.equipAnimDuration =
       spec.category === 'sniper'
-        ? 0.42
+        ? 0.62
         : spec.category === 'rifle'
           ? 0.34
           : spec.category === 'smg'
@@ -990,6 +1043,9 @@ export class GameEngine {
     this.camera.updateProjectionMatrix();
     this.reloadTimer = 0;
     this.inspectTimer = 0;
+    this.fireCooldown = 0;
+    this.burstQueue = 0;
+    this.burstQueueTimer = 0;
     this.awpBoltTimer = 0;
     this.awpShellEjected = false;
     if (actor.isLocal) {
@@ -1133,12 +1189,14 @@ export class GameEngine {
       yaw: 0,
       pitch: 0,
       crouching: false,
+      grounded: true,
       activeSlot: 2,
       primary: null,
       secondary: createWeaponInstance(starterId),
       knife: 'bayonet',
       grenades: [],
       hasC4: false,
+      hasDefuseKit: false,
       blindTimer: 0,
       inBuyZone: true,
       hurtFlash: 0,
@@ -1160,6 +1218,7 @@ export class GameEngine {
     this.camera.fov = 78;
     this.camera.updateProjectionMatrix();
     this.reloadTimer = 0;
+    this.fireCooldown = 0;
     this.awpBoltTimer = 0;
     this.awpShellEjected = false;
     this.recoilBloom = 0;
@@ -1167,6 +1226,8 @@ export class GameEngine {
     this.killConfirm = null;
     this.killConfirmTimer = 0;
     this.spectateTargetId = null;
+    this.c4PickupCooldown = 0;
+    this.c4DropperId = null;
 
     if (isHalftimeRound(this.roundNumber, this.config.maxRounds)) {
       const prevAtk = this.attackerScore;
@@ -1179,6 +1240,7 @@ export class GameEngine {
         a.cash = ECONOMY_CONSTANTS.STARTING_CASH;
         a.armor = 0;
         a.hasHelmet = false;
+        a.hasDefuseKit = false;
         a.primary = null;
         a.secondary = createWeaponInstance(getStarterPistol(a.team));
         a.grenades = [];
@@ -1204,6 +1266,7 @@ export class GameEngine {
       actor.yaw = spawn.yaw;
       actor.pitch = 0;
       actor.crouching = false;
+      actor.grounded = true;
 
       if (!actor.alive) {
         actor.primary = null;
@@ -1211,6 +1274,7 @@ export class GameEngine {
         actor.grenades = [];
         actor.armor = 0;
         actor.hasHelmet = false;
+        actor.hasDefuseKit = false;
       } else {
         if (actor.primary) {
           const s = WEAPONS[actor.primary.id];
@@ -1270,12 +1334,19 @@ export class GameEngine {
             brain.path = [];
             brain.lastGoalId = '';
             brain.targetSite = Math.random() > 0.5 ? 'A' : 'B';
+            brain.reloadTimer = 0;
+            brain.reloadingSlot = null;
+            brain.memoryTimer = 0;
+            brain.alertTimer = 0;
+            brain.stuckTimer = 0;
+            brain.stuckSkipCount = 0;
           }
         }
       }
     }
 
     if (this.config.mode === 'spectate') {
+      this.xrayEnabled = true;
       const initialSpec = this.getSpectateTarget();
       this.syncSpectatorCamera(initialSpec, 0, performance.now());
       this.syncActorMeshes(initialSpec, performance.now());
@@ -1318,8 +1389,8 @@ export class GameEngine {
     this.activeSmokes = [];
     for (const f of this.activeFires) this.scene.remove(f.group);
     this.activeFires = [];
-    for (const d of this.droppedWeapons) this.scene.remove(d.mesh);
-    this.droppedWeapons = [];
+    for (const d of this.droppedPickups) this.scene.remove(d.mesh);
+    this.droppedPickups = [];
 
     if (this.decalMesh) {
       this._mat4A.makeScale(0, 0, 0);
@@ -1369,7 +1440,7 @@ export class GameEngine {
     this.emitHud(true);
   }
 
-  public buyWeaponOrItem(itemId: WeaponId | ArmorType): { ok: boolean; reason?: string } {
+  public buyWeaponOrItem(itemId: BuyableGearId): { ok: boolean; reason?: string } {
     const local = this.getLocalActor();
     if (!local) return { ok: false, reason: 'No active player' };
     const isBuy = this.phase === 'buy';
@@ -1389,6 +1460,22 @@ export class GameEngine {
       return { ok: true };
     }
 
+    if (itemId === 'defuse_kit') {
+      if (!local.alive) return { ok: false, reason: 'Cannot buy while dead' };
+      if (!isBuy) return { ok: false, reason: 'Buy phase ended' };
+      if (!local.inBuyZone) return { ok: false, reason: 'Outside spawn buy zone' };
+      if (local.team !== 'defenders') return { ok: false, reason: 'Defenders only' };
+      if (local.hasDefuseKit) return { ok: false, reason: 'Defuse Kit already equipped' };
+      if (local.cash < ECONOMY_CONSTANTS.DEFUSE_KIT_PRICE) {
+        return { ok: false, reason: 'Insufficient funds' };
+      }
+      local.cash -= ECONOMY_CONSTANTS.DEFUSE_KIT_PRICE;
+      local.hasDefuseKit = true;
+      soundEngine.playUiTick(900);
+      this.emitHud(true);
+      return { ok: true };
+    }
+
     if (itemId === 'none') return { ok: false };
 
     const check = canBuyWeapon(local, itemId, isBuy);
@@ -1402,9 +1489,11 @@ export class GameEngine {
     } else if (spec.slot === 1) {
       local.primary = createWeaponInstance(itemId);
       local.activeSlot = 1;
+      this.triggerEquipAnim(itemId);
     } else if (spec.slot === 2) {
       local.secondary = createWeaponInstance(itemId);
       local.activeSlot = 2;
+      this.triggerEquipAnim(itemId);
     } else if (spec.slot === 4) {
       local.grenades.push(itemId as GrenadeId);
       local.activeSlot = 4;
@@ -1447,38 +1536,362 @@ export class GameEngine {
     this.emitHud(true);
   }
 
-  private dropPrimaryWeapon(actor: ActorState): void {
-    if (!actor.alive || !actor.primary) return;
-    const dropped = actor.primary;
-    actor.primary = null;
-    actor.activeSlot = 2;
-    this.scopeZoom = 0;
-    this.camera.fov = 78;
-    this.camera.updateProjectionMatrix();
+  private spawnDroppedPickup(params: {
+    kind: 'weapon' | 'grenade' | 'kit';
+    weaponId?: PrimaryWeaponId | SecondaryWeaponId;
+    grenadeId?: GrenadeId;
+    mag?: number;
+    reserve?: number;
+    x: number;
+    y: number;
+    z: number;
+    yaw: number;
+    pickupCooldown: number;
+    dropperId: string | null;
+  }): void {
+    const group = new THREE.Group();
+    if (params.kind === 'weapon' && params.weaponId) {
+      const spec = WEAPONS[params.weaponId];
+      const isPrimary = spec.slot === 1;
+      const bodyMat = new THREE.MeshStandardMaterial({
+        color:
+          params.weaponId === 'awp'
+            ? 0x2f4830
+            : params.weaponId === 'ak47'
+              ? 0x5c3c24
+              : 0x333942,
+        roughness: 0.45,
+        metalness: 0.72,
+      });
+      const barrelMat = new THREE.MeshStandardMaterial({
+        color: 0x1e242b,
+        roughness: 0.35,
+        metalness: 0.85,
+      });
+      const receiver = new THREE.Mesh(
+        new THREE.BoxGeometry(isPrimary ? 0.1 : 0.06, isPrimary ? 0.14 : 0.11, isPrimary ? 0.56 : 0.28),
+        bodyMat
+      );
+      group.add(receiver);
+      const barrel = new THREE.Mesh(
+        new THREE.BoxGeometry(0.04, 0.04, isPrimary ? 0.42 : 0.16),
+        barrelMat
+      );
+      barrel.position.set(0, 0.02, isPrimary ? -0.34 : -0.14);
+      group.add(barrel);
+    } else if (params.kind === 'grenade' && params.grenadeId) {
+      const color =
+        params.grenadeId === 'flashbang'
+          ? 0xe2e8f0
+          : params.grenadeId === 'smoke'
+            ? 0x4b6a48
+            : params.grenadeId === 'molotov' || params.grenadeId === 'incendiary'
+              ? 0xea580c
+              : 0x3b4832;
+      const canister = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.065, 0.065, 0.16, 10),
+        new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.4 })
+      );
+      canister.rotation.z = Math.PI * 0.42;
+      group.add(canister);
+    } else {
+      const pouch = new THREE.Mesh(
+        new THREE.BoxGeometry(0.24, 0.12, 0.2),
+        new THREE.MeshStandardMaterial({ color: 0x0ea5e9, roughness: 0.5, metalness: 0.25 })
+      );
+      const strap = new THREE.Mesh(
+        new THREE.BoxGeometry(0.06, 0.14, 0.22),
+        new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.7 })
+      );
+      group.add(pouch, strap);
+    }
 
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(0.14, 0.14, 0.72),
-      new THREE.MeshStandardMaterial({ color: 0x3b4148, roughness: 0.45, metalness: 0.75 })
-    );
+    const groundY = Math.max(0.08, params.y + 0.08);
+    group.position.set(params.x, groundY, params.z);
+    group.rotation.y = params.yaw;
+    this.scene.add(group);
+
+    this.droppedPickups.push({
+      id: this.nextEntityUid++,
+      kind: params.kind,
+      weaponId: params.weaponId,
+      grenadeId: params.grenadeId,
+      mag: params.mag,
+      reserve: params.reserve,
+      x: params.x,
+      y: groundY,
+      z: params.z,
+      pickupCooldown: params.pickupCooldown,
+      dropperId: params.dropperId,
+      mesh: group,
+    });
+  }
+
+  private dropActiveItem(actor: ActorState): void {
+    if (!actor.alive) return;
     const fx = -Math.sin(actor.yaw);
     const fz = -Math.cos(actor.yaw);
-    const px = actor.x + fx * 1.1;
-    const pz = actor.z + fz * 1.1;
-    mesh.position.set(px, 0.12, pz);
-    mesh.rotation.y = actor.yaw;
-    this.scene.add(mesh);
+    const dropX = actor.x + fx * 1.15;
+    const dropZ = actor.z + fz * 1.15;
 
-    this.droppedWeapons.push({
-      id: this.nextEntityUid++,
-      weaponId: dropped.id as PrimaryWeaponId,
-      mag: dropped.mag,
-      reserve: dropped.reserve,
-      x: px,
-      y: 0.12,
-      z: pz,
-      mesh,
-    });
-    this.emitHud(true);
+    if (actor.activeSlot === 1 && actor.primary) {
+      const dropped = actor.primary;
+      actor.primary = null;
+      actor.activeSlot = actor.secondary ? 2 : 3;
+      this.scopeZoom = 0;
+      this.camera.fov = 78;
+      this.camera.updateProjectionMatrix();
+      this.reloadTimer = 0;
+      this.awpBoltTimer = 0;
+      this.spawnDroppedPickup({
+        kind: 'weapon',
+        weaponId: dropped.id as PrimaryWeaponId,
+        mag: dropped.mag,
+        reserve: dropped.reserve,
+        x: dropX,
+        y: actor.y,
+        z: dropZ,
+        yaw: actor.yaw,
+        pickupCooldown: 0.85,
+        dropperId: actor.id,
+      });
+      if (actor.isLocal) this.triggerEquipAnim(this.getActiveWeaponId(actor));
+      soundEngine.playUiTick(480);
+      this.emitHud(true);
+      return;
+    }
+
+    if (actor.activeSlot === 2 && actor.secondary) {
+      const dropped = actor.secondary;
+      actor.secondary = null;
+      actor.activeSlot = actor.primary ? 1 : 3;
+      this.reloadTimer = 0;
+      this.spawnDroppedPickup({
+        kind: 'weapon',
+        weaponId: dropped.id as SecondaryWeaponId,
+        mag: dropped.mag,
+        reserve: dropped.reserve,
+        x: dropX,
+        y: actor.y,
+        z: dropZ,
+        yaw: actor.yaw,
+        pickupCooldown: 0.85,
+        dropperId: actor.id,
+      });
+      if (actor.isLocal) this.triggerEquipAnim(this.getActiveWeaponId(actor));
+      soundEngine.playUiTick(480);
+      this.emitHud(true);
+      return;
+    }
+
+    if (actor.activeSlot === 5 && actor.hasC4) {
+      actor.hasC4 = false;
+      actor.activeSlot = actor.primary ? 1 : actor.secondary ? 2 : 3;
+      this.bomb.status = 'dropped';
+      this.bomb.carrierId = null;
+      this.bomb.plantProgress = 0;
+      this.bomb.x = dropX;
+      this.bomb.y = actor.y;
+      this.bomb.z = dropZ;
+      this.c4PickupCooldown = 0.85;
+      this.c4DropperId = actor.id;
+      this.worldBombGroup.position.set(dropX, actor.y, dropZ);
+      this.worldBombGroup.visible = true;
+      if (actor.isLocal) this.triggerEquipAnim(this.getActiveWeaponId(actor));
+      soundEngine.playUiTick(440);
+      this.emitHud(true);
+    }
+  }
+
+  private getPickupLabel(p: DroppedPickup): string {
+    if (p.kind === 'weapon' && p.weaponId) return WEAPONS[p.weaponId].name;
+    if (p.kind === 'grenade' && p.grenadeId) return WEAPONS[p.grenadeId].name;
+    return 'Defuse Kit';
+  }
+
+  private findLookedAtPickup(actor: ActorState): { pickup: DroppedPickup; index: number } | null {
+    const eyeY = actor.y + (actor.crouching ? 1.08 : 1.62);
+    const cosP = Math.cos(actor.pitch);
+    const lx = -Math.sin(actor.yaw) * cosP;
+    const ly = Math.sin(actor.pitch);
+    const lz = -Math.cos(actor.yaw) * cosP;
+
+    let bestIdx = -1;
+    let bestScore = -1;
+
+    for (let i = 0; i < this.droppedPickups.length; i++) {
+      const p = this.droppedPickups[i];
+      const dx = p.x - actor.x;
+      const dy = p.y - eyeY;
+      const dz = p.z - actor.z;
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist > 3.2 || dist < 0.05) continue;
+
+      const dot = (dx * lx + dy * ly + dz * lz) / dist;
+      if (dot < 0.84) continue;
+      if (!hasLineOfSight(actor.x, eyeY, actor.z, p.x, p.y + 0.12, p.z, [])) continue;
+
+      const score = dot - dist * 0.06;
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+
+    return bestIdx >= 0 ? { pickup: this.droppedPickups[bestIdx], index: bestIdx } : null;
+  }
+
+  private canInteractPickup(actor: ActorState, p: DroppedPickup): { canUse: boolean; swapName?: string } {
+    if (p.kind === 'weapon' && p.weaponId) {
+      const slot = WEAPONS[p.weaponId].slot;
+      if (slot === 1) {
+        if (!actor.primary) return { canUse: true };
+        if (actor.primary.id === p.weaponId) return { canUse: false };
+        return { canUse: true, swapName: WEAPONS[actor.primary.id].name };
+      }
+      if (slot === 2) {
+        if (!actor.secondary) return { canUse: true };
+        if (actor.secondary.id === p.weaponId) return { canUse: false };
+        return { canUse: true, swapName: WEAPONS[actor.secondary.id].name };
+      }
+    }
+    if (p.kind === 'grenade' && p.grenadeId) {
+      return { canUse: canPickUpGrenade(actor.grenades, p.grenadeId) };
+    }
+    if (p.kind === 'kit') {
+      return { canUse: actor.team === 'defenders' && !actor.hasDefuseKit };
+    }
+    return { canUse: false };
+  }
+
+  private tryInteractPickup(actor: ActorState): boolean {
+    if (!actor.alive) return false;
+    // Do not hijack [E] if actively standing on plant zone with C4 or near planted bomb as defender
+    if (this.phase === 'live' && actor.team === 'attackers' && actor.hasC4 && getPlantSiteAt(actor.x, actor.z)) {
+      return false;
+    }
+    if (
+      this.phase === 'planted' &&
+      actor.team === 'defenders' &&
+      Math.hypot(this.bomb.x - actor.x, this.bomb.z - actor.z) < 2.5
+    ) {
+      return false;
+    }
+
+    const found = this.findLookedAtPickup(actor);
+    if (!found) return false;
+    const { pickup, index } = found;
+    const check = this.canInteractPickup(actor, pickup);
+    if (!check.canUse) return false;
+
+    this.applyPickupToActor(actor, index, true);
+    return true;
+  }
+
+  private applyPickupToActor(actor: ActorState, index: number, allowSwap: boolean): boolean {
+    const p = this.droppedPickups[index];
+    if (!p) return false;
+
+    if (p.kind === 'weapon' && p.weaponId) {
+      const spec = WEAPONS[p.weaponId];
+      if (spec.slot === 1) {
+        if (actor.primary && !allowSwap) return false;
+        const old = actor.primary;
+        actor.primary = {
+          id: p.weaponId as PrimaryWeaponId,
+          mag: p.mag ?? spec.magSize,
+          reserve: p.reserve ?? spec.reserveAmmo,
+        };
+        actor.activeSlot = 1;
+        this.scene.remove(p.mesh);
+        this.droppedPickups.splice(index, 1);
+
+        if (old) {
+          this.spawnDroppedPickup({
+            kind: 'weapon',
+            weaponId: old.id as PrimaryWeaponId,
+            mag: old.mag,
+            reserve: old.reserve,
+            x: p.x,
+            y: p.y - 0.08,
+            z: p.z,
+            yaw: actor.yaw,
+            pickupCooldown: 0.75,
+            dropperId: actor.id,
+          });
+        }
+        if (actor.isLocal) {
+          this.reloadTimer = 0;
+          this.awpBoltTimer = 0;
+          this.scopeZoom = 0;
+          this.camera.fov = 78;
+          this.camera.updateProjectionMatrix();
+          this.triggerEquipAnim(p.weaponId);
+        }
+        soundEngine.playUiTick(780);
+        this.emitHud(true);
+        return true;
+      }
+
+      if (spec.slot === 2) {
+        if (actor.secondary && !allowSwap) return false;
+        const old = actor.secondary;
+        actor.secondary = {
+          id: p.weaponId as SecondaryWeaponId,
+          mag: p.mag ?? spec.magSize,
+          reserve: p.reserve ?? spec.reserveAmmo,
+        };
+        if (!actor.primary || allowSwap) {
+          actor.activeSlot = 2;
+        }
+        this.scene.remove(p.mesh);
+        this.droppedPickups.splice(index, 1);
+
+        if (old) {
+          this.spawnDroppedPickup({
+            kind: 'weapon',
+            weaponId: old.id as SecondaryWeaponId,
+            mag: old.mag,
+            reserve: old.reserve,
+            x: p.x,
+            y: p.y - 0.08,
+            z: p.z,
+            yaw: actor.yaw,
+            pickupCooldown: 0.75,
+            dropperId: actor.id,
+          });
+        }
+        if (actor.isLocal && actor.activeSlot === 2) {
+          this.reloadTimer = 0;
+          this.triggerEquipAnim(p.weaponId);
+        }
+        soundEngine.playUiTick(780);
+        this.emitHud(true);
+        return true;
+      }
+    }
+
+    if (p.kind === 'grenade' && p.grenadeId) {
+      if (!canPickUpGrenade(actor.grenades, p.grenadeId)) return false;
+      actor.grenades.push(p.grenadeId);
+      this.scene.remove(p.mesh);
+      this.droppedPickups.splice(index, 1);
+      soundEngine.playUiTick(760);
+      this.emitHud(true);
+      return true;
+    }
+
+    if (p.kind === 'kit') {
+      if (actor.team !== 'defenders' || actor.hasDefuseKit) return false;
+      actor.hasDefuseKit = true;
+      this.scene.remove(p.mesh);
+      this.droppedPickups.splice(index, 1);
+      soundEngine.playUiTick(840);
+      this.emitHud(true);
+      return true;
+    }
+
+    return false;
   }
 
   private tryLocalPrimaryAttack(): void {
@@ -1537,6 +1950,7 @@ export class GameEngine {
     const spec = WEAPONS[inst.id];
 
     if (spec.hasScope) {
+      if (this.awpBoltTimer > 0 || this.reloadTimer > 0) return;
       this.scopeZoom = ((this.scopeZoom + 1) % 3) as 0 | 1 | 2;
       this.camera.fov = this.scopeZoom === 2 ? 18 : this.scopeZoom === 1 ? 35 : 78;
       this.camera.updateProjectionMatrix();
@@ -1563,13 +1977,18 @@ export class GameEngine {
 
     const eyeY = actor.y + (actor.crouching ? 1.08 : 1.62);
     const horizSpeed = Math.hypot(actor.vx, actor.vz);
+    const isAirborne = actor.isLocal ? !this.grounded : !(actor.grounded ?? true);
     const spread = computeWeaponSpread({
       weaponId: inst.id,
       horizontalSpeed: horizSpeed,
       isCrouching: actor.crouching,
-      isAirborne: actor.y > 0.08,
+      isAirborne,
       recoilBloom: actor.isLocal ? this.recoilBloom : 0.004,
-      scopeZoom: actor.isLocal ? this.scopeZoom : 0,
+      scopeZoom: actor.isLocal
+        ? this.scopeZoom
+        : spec.hasScope && horizSpeed <= 0.8 && !isAirborne
+          ? 1
+          : 0,
     });
 
     // Compute exact ray BEFORE applying this shot's recoil kick and bloom so first shots & AWP shots hit dead-on crosshair
@@ -1611,6 +2030,7 @@ export class GameEngine {
     }
 
     if (actor.isLocal) {
+      this.equipAnimTimer = 0;
       this.fireCooldown = interval;
       this.recoilOffsetZ = inst.id === 'awp' ? 0.13 : 0.085;
       this.recoilKickPitch += spec.recoilKick;
@@ -1623,6 +2043,18 @@ export class GameEngine {
         this.awpShellEjected = false;
       } else {
         this.spawnShellCasing(actor);
+      }
+    }
+
+    // Nearby bots hear unsilenced gunfire and orient toward the sound source
+    if (!inst.silenced && !this.config.legacyBots) {
+      for (const other of this.actors) {
+        if (!other.isBot || !other.alive || other.team === actor.team) continue;
+        const d = Math.hypot(other.x - actor.x, other.z - actor.z);
+        if (d <= 28) {
+          const brain = this.botBrains.get(other.id);
+          if (brain) notifyBotThreat(brain, actor.x, actor.z, 1.0);
+        }
       }
     }
 
@@ -1872,6 +2304,9 @@ export class GameEngine {
       if (aimpunch > 0) {
         this.flinchPitch = Math.min(0.18, this.flinchPitch + aimpunch);
       }
+    } else if (victim.isBot && attacker && !this.config.legacyBots) {
+      const brain = this.botBrains.get(victim.id);
+      if (brain) notifyBotThreat(brain, attacker.x, attacker.z, 1.8);
     }
 
     if (victim.hp <= 0) {
@@ -1928,17 +2363,64 @@ export class GameEngine {
         }
       }
 
-      if (victim.hasC4) {
-        victim.hasC4 = false;
+      // Death drops: most expensive weapon, C4 bomb, all utility grenades, and Defuse Kit
+      const drops = selectDeathDrops(victim);
+      if (drops.weapon) {
+        this.spawnDroppedPickup({
+          kind: 'weapon',
+          weaponId: drops.weapon.id as PrimaryWeaponId | SecondaryWeaponId,
+          mag: drops.weapon.mag,
+          reserve: drops.weapon.reserve,
+          x: victim.x,
+          y: victim.y,
+          z: victim.z,
+          yaw: victim.yaw,
+          pickupCooldown: 0,
+          dropperId: null,
+        });
+      }
+      for (let gi = 0; gi < drops.grenades.length; gi++) {
+        const ang = (gi / Math.max(1, drops.grenades.length)) * Math.PI * 2 + 0.5;
+        this.spawnDroppedPickup({
+          kind: 'grenade',
+          grenadeId: drops.grenades[gi],
+          x: victim.x + Math.cos(ang) * 0.45,
+          y: victim.y,
+          z: victim.z + Math.sin(ang) * 0.45,
+          yaw: ang,
+          pickupCooldown: 0,
+          dropperId: null,
+        });
+      }
+      if (drops.defuseKit) {
+        this.spawnDroppedPickup({
+          kind: 'kit',
+          x: victim.x - 0.4,
+          y: victim.y,
+          z: victim.z + 0.35,
+          yaw: 0.4,
+          pickupCooldown: 0,
+          dropperId: null,
+        });
+      }
+      if (drops.c4) {
         this.bomb.status = 'dropped';
         this.bomb.carrierId = null;
         this.bomb.plantProgress = 0;
-        this.bomb.x = victim.x;
+        this.bomb.x = victim.x + 0.35;
         this.bomb.y = victim.y;
-        this.bomb.z = victim.z;
-        this.worldBombGroup.position.set(victim.x, victim.y, victim.z);
+        this.bomb.z = victim.z - 0.35;
+        this.c4PickupCooldown = 0;
+        this.c4DropperId = null;
+        this.worldBombGroup.position.set(this.bomb.x, victim.y, this.bomb.z);
         this.worldBombGroup.visible = true;
       }
+
+      victim.primary = null;
+      victim.secondary = null;
+      victim.grenades = [];
+      victim.hasC4 = false;
+      victim.hasDefuseKit = false;
 
       this.killFeed.unshift({
         id: this.nextKillId++,
@@ -2661,12 +3143,24 @@ export class GameEngine {
       }
     }
 
+    if (this.c4PickupCooldown > 0) {
+      this.c4PickupCooldown = Math.max(0, this.c4PickupCooldown - dt);
+      if (this.c4PickupCooldown <= 0) this.c4DropperId = null;
+    }
+    for (const p of this.droppedPickups) {
+      if (p.pickupCooldown > 0) {
+        p.pickupCooldown = Math.max(0, p.pickupCooldown - dt);
+        if (p.pickupCooldown <= 0) p.dropperId = null;
+      }
+    }
+
     const local = this.getLocalActor();
     if (local) {
       this.updateLocalPlayer(local, dt);
     }
 
     if (this.isHostAuthority && this.phase !== 'round_end' && this.phase !== 'match_end') {
+      let botDefusingId: string | null = null;
       for (const actor of this.actors) {
         if (!actor.isBot || !actor.alive) continue;
         const brain = this.botBrains.get(actor.id);
@@ -2681,22 +3175,49 @@ export class GameEngine {
           difficulty: this.config.difficulty,
           isBuyPhase: this.phase === 'buy',
           dt,
+          legacyVision: Boolean(this.config.legacyBots),
         });
 
         actor.yaw = cmd.targetYaw;
         actor.pitch = cmd.targetPitch;
         actor.vx = cmd.moveX;
         actor.vz = cmd.moveZ;
+        actor.vy -= 18.5 * dt;
 
         const nextX = actor.x + actor.vx * dt;
+        const nextY = actor.y + actor.vy * dt;
         const nextZ = actor.z + actor.vz * dt;
-        const res = resolvePlayerMovement(nextX, actor.y, nextZ, actor.vy, 0.42, 1.8);
+        const res = resolvePlayerMovement(nextX, nextY, nextZ, actor.vy, 0.42, 1.8);
         actor.x = res.x;
         actor.y = res.y;
         actor.z = res.z;
+        actor.grounded = res.grounded;
+        if (res.grounded) actor.vy = 0;
 
-        if (cmd.wantReload) {
-          const inst = actor.activeSlot === 1 ? actor.primary : actor.secondary;
+        // Bot walk-over pickups (dropped bomb, defuse kit, empty weapon slot / better rifle)
+        if (
+          actor.team === 'attackers' &&
+          this.bomb.status === 'dropped' &&
+          (this.c4PickupCooldown <= 0 || this.c4DropperId !== actor.id) &&
+          Math.hypot(this.bomb.x - actor.x, this.bomb.z - actor.z) < 1.6
+        ) {
+          actor.hasC4 = true;
+          this.bomb.status = 'carried';
+          this.bomb.carrierId = actor.id;
+          this.worldBombGroup.visible = false;
+        }
+        for (let pi = this.droppedPickups.length - 1; pi >= 0; pi--) {
+          const p = this.droppedPickups[pi];
+          if (p.pickupCooldown > 0 && p.dropperId === actor.id) continue;
+          if (Math.hypot(p.x - actor.x, p.z - actor.z) < 1.45) {
+            this.applyPickupToActor(actor, pi, false);
+          }
+        }
+
+        if (cmd.completedReload) {
+          const slotToFill = brain.reloadingSlot ?? (actor.activeSlot === 1 ? 1 : 2);
+          const inst = slotToFill === 1 ? actor.primary : actor.secondary;
+          brain.reloadingSlot = null;
           if (inst) {
             const spec = WEAPONS[inst.id];
             const take = Math.min(spec.magSize - inst.mag, inst.reserve);
@@ -2704,7 +3225,7 @@ export class GameEngine {
             inst.reserve -= take;
           }
         }
-        if (cmd.wantFire) {
+        if (cmd.wantFire && brain.reloadTimer <= 0) {
           const inst = actor.activeSlot === 1 ? actor.primary : actor.secondary;
           if (inst && inst.mag > 0) {
             this.fireBulletWeapon(actor, inst);
@@ -2720,6 +3241,7 @@ export class GameEngine {
         if (cmd.wantPlant && actor.hasC4 && this.phase === 'live') {
           const site = getPlantSiteAt(actor.x, actor.z);
           if (site) {
+            this.bomb.status = 'planting';
             this.bomb.plantProgress += dt / ROUND_CONSTANTS.C4_PLANT_SECONDS;
             if (this.bomb.plantProgress >= 1) {
               this.completeBombPlant(actor, site);
@@ -2727,11 +3249,26 @@ export class GameEngine {
           }
         }
         if (cmd.wantDefuse && this.phase === 'planted') {
-          this.bomb.defuseProgress += dt / ROUND_CONSTANTS.C4_DEFUSE_SECONDS;
+          botDefusingId = actor.id;
+          this.bomb.status = 'defusing';
+          this.bomb.defuserId = actor.id;
+          this.bomb.defuseProgress += dt / getDefuseDurationSeconds(actor.hasDefuseKit);
           if (this.bomb.defuseProgress >= 1) {
             this.completeBombDefuse();
           }
         }
+      }
+      // If the defusing bot stopped defusing (e.g., got into combat), reset defuse progress cleanly
+      if (
+        this.phase === 'planted' &&
+        this.bomb.status === 'defusing' &&
+        this.bomb.defuserId &&
+        this.bomb.defuserId !== this.localActorId &&
+        this.bomb.defuserId !== botDefusingId
+      ) {
+        this.bomb.status = 'planted';
+        this.bomb.defuseProgress = 0;
+        this.bomb.defuserId = null;
       }
     }
 
@@ -2804,7 +3341,7 @@ export class GameEngine {
     }
 
     this.hudEmitAccum += dt;
-    if (this.hudEmitAccum >= 0.08) {
+    if (this.hudEmitAccum >= 0.035) {
       this.hudEmitAccum = 0;
       this.emitHud(false);
     }
@@ -2926,27 +3463,25 @@ export class GameEngine {
     local.x = col.x;
     local.y = col.y;
     local.z = col.z;
+    local.grounded = col.grounded;
     this.grounded = col.grounded;
     if (col.grounded) local.vy = 0;
 
     local.inBuyZone = isInBuyZone(local.team, local.x, local.z);
 
-    if (!local.primary) {
-      for (let i = this.droppedWeapons.length - 1; i >= 0; i--) {
-        const d = this.droppedWeapons[i];
-        if (Math.hypot(d.x - local.x, d.z - local.z) < 1.5) {
-          local.primary = { id: d.weaponId, mag: d.mag, reserve: d.reserve };
-          local.activeSlot = 1;
-          this.scene.remove(d.mesh);
-          this.droppedWeapons.splice(i, 1);
-          soundEngine.playUiTick(780);
-          break;
-        }
+    // Walk-over auto-pickup for floor weapons/grenades/defuse kit (when slot empty / not recently dropped by self)
+    for (let i = this.droppedPickups.length - 1; i >= 0; i--) {
+      const p = this.droppedPickups[i];
+      if (p.pickupCooldown > 0 && p.dropperId === local.id) continue;
+      if (Math.hypot(p.x - local.x, p.z - local.z) < 1.45) {
+        this.applyPickupToActor(local, i, false);
       }
     }
+
     if (
       local.team === 'attackers' &&
       this.bomb.status === 'dropped' &&
+      (this.c4PickupCooldown <= 0 || this.c4DropperId !== local.id) &&
       Math.hypot(this.bomb.x - local.x, this.bomb.z - local.z) < 1.6
     ) {
       local.hasC4 = true;
@@ -2997,11 +3532,11 @@ export class GameEngine {
     ) {
       this.bomb.status = 'defusing';
       this.bomb.defuserId = local.id;
-      this.bomb.defuseProgress += dt / ROUND_CONSTANTS.C4_DEFUSE_SECONDS;
+      this.bomb.defuseProgress += dt / getDefuseDurationSeconds(local.hasDefuseKit);
       if (this.bomb.defuseProgress >= 1) {
         this.completeBombDefuse();
       }
-    } else if (this.bomb.status === 'defusing') {
+    } else if (this.bomb.status === 'defusing' && this.bomb.defuserId === local.id) {
       this.bomb.status = 'planted';
       this.bomb.defuseProgress = 0;
       this.bomb.defuserId = null;
@@ -3019,6 +3554,11 @@ export class GameEngine {
     }
 
     if (this.awpBoltTimer > 0) {
+      if (this.scopeZoom > 0) {
+        this.scopeZoom = 0;
+        this.camera.fov = 78;
+        this.camera.updateProjectionMatrix();
+      }
       this.awpBoltTimer = Math.max(0, this.awpBoltTimer - dt);
       const boltProgress = 1 - this.awpBoltTimer / this.awpBoltDuration;
       if (!this.awpShellEjected && boltProgress >= 0.28) {
@@ -3189,6 +3729,10 @@ export class GameEngine {
       handle.root.visible = visible;
       handle.headGroup.visible = visible;
       handle.helmetMesh.visible = visible && actor.hasHelmet;
+      const showXray = visible && this.config.mode === 'spectate' && this.xrayEnabled;
+      for (const xm of handle.xrayMeshes) {
+        xm.visible = showXray;
+      }
       if (!actor.alive || isViewer) continue;
       handle.root.position.set(actor.x, actor.y, actor.z);
       handle.root.rotation.y = actor.yaw;
@@ -3484,6 +4028,7 @@ export class GameEngine {
         knifeId: 'bayonet',
         grenades: [],
         hasC4: false,
+        hasDefuseKit: false,
         bomb: this.bomb,
         crosshairSpread: 2,
         blindAlpha: 0,
@@ -3493,6 +4038,8 @@ export class GameEngine {
         interactPrompt: null,
         killFeed: [],
         radarBlips: [],
+        teammateOverlays: [],
+        xrayEnabled: this.xrayEnabled,
         localYaw: 0,
         localX: 0,
         localZ: 44,
@@ -3528,7 +4075,7 @@ export class GameEngine {
       weaponId: activeId,
       horizontalSpeed: horizSpeed,
       isCrouching: displayActor.crouching,
-      isAirborne: displayActor.y > 0.08,
+      isAirborne: localAliveNow ? !this.grounded : !(displayActor.grounded ?? true),
       recoilBloom: localAliveNow ? this.recoilBloom : 0,
       scopeZoom: localAliveNow ? this.scopeZoom : 0,
     });
@@ -3553,8 +4100,25 @@ export class GameEngine {
       ) {
         interactPrompt =
           this.bomb.status === 'defusing'
-            ? 'Defusing C4...'
-            : 'Hold [E] to Defuse C4';
+            ? local.hasDefuseKit
+              ? 'Defusing C4 (Kit · 5s)...'
+              : 'Defusing C4 (10s)...'
+            : local.hasDefuseKit
+              ? 'Hold [E] to Defuse C4 (Kit · 5s)'
+              : 'Hold [E] to Defuse C4 (10s)';
+      }
+
+      if (!interactPrompt) {
+        const looked = this.findLookedAtPickup(local);
+        if (looked) {
+          const check = this.canInteractPickup(local, looked.pickup);
+          if (check.canUse) {
+            const label = this.getPickupLabel(looked.pickup);
+            interactPrompt = check.swapName
+              ? `[E] Swap ${check.swapName} for ${label}`
+              : `[E] Pick up ${label}`;
+          }
+        }
       }
     }
 
@@ -3583,6 +4147,52 @@ export class GameEngine {
         alive: a.alive,
       };
     });
+
+    // Projected overhead HUD tags: teammates always when playing/spectating, OR both teams when Watch Bots X-Ray is ON
+    const teammateOverlays: TeammateOverlay[] = [];
+    if (this.screen === 'playing') {
+      this.camera.updateMatrixWorld();
+      for (const a of this.actors) {
+        if (!a.alive || a.id === displayActor.id) continue;
+        const showThisActor =
+          isSpectateMode && this.xrayEnabled ? true : a.team === defaultActor.team;
+        if (!showThisActor) continue;
+
+        const dist = Math.hypot(a.x - displayActor.x, a.z - displayActor.z);
+        const maxLabelDist = isSpectateMode && this.xrayEnabled ? 150 : 65;
+        if (dist > maxLabelDist || dist < 0.7) continue;
+
+        this._vec3A.set(a.x, a.y + (a.crouching ? 1.58 : 2.12), a.z);
+        this._vec3A.project(this.camera);
+        if (this._vec3A.z < -1 || this._vec3A.z > 1) continue;
+
+        const xPct = (this._vec3A.x * 0.5 + 0.5) * 100;
+        const yPct = (-this._vec3A.y * 0.5 + 0.5) * 100;
+        if (xPct < -6 || xPct > 106 || yPct < -6 || yPct > 106) continue;
+
+        const botBrain = a.isBot ? this.botBrains.get(a.id) : undefined;
+        teammateOverlays.push({
+          id: a.id,
+          name: a.name,
+          team: a.team,
+          hp: Math.round(a.hp),
+          armor: Math.round(a.armor),
+          primaryName: a.primary ? WEAPONS[a.primary.id].name : null,
+          secondaryName: a.secondary ? WEAPONS[a.secondary.id].name : null,
+          activeWeaponName: WEAPONS[this.getActiveWeaponId(a)].name,
+          hasC4: a.hasC4,
+          hasDefuseKit: a.hasDefuseKit,
+          grenadeCount: a.grenades.length,
+          isReloading: Boolean(botBrain && botBrain.reloadTimer > 0),
+          xPct,
+          yPct,
+          dist,
+        });
+      }
+      teammateOverlays.sort((a, b) => b.dist - a.dist);
+    }
+
+    const specBrain = !localAliveNow && specTarget?.isBot ? this.botBrains.get(specTarget.id) : undefined;
 
     this.onHudUpdate({
       screen: this.screen,
@@ -3621,12 +4231,13 @@ export class GameEngine {
       silenced: Boolean(activeInst?.silenced),
       burstMode: Boolean(activeInst?.burstMode),
       scopeZoom: localAliveNow ? this.scopeZoom : 0,
-      isReloading: localAliveNow && this.reloadTimer > 0,
+      isReloading: localAliveNow ? this.reloadTimer > 0 : Boolean(specBrain && specBrain.reloadTimer > 0),
       primaryId: (displayActor.primary?.id as PrimaryWeaponId) ?? null,
       secondaryId: (displayActor.secondary?.id as SecondaryWeaponId) ?? null,
       knifeId: displayActor.knife,
       grenades: [...displayActor.grenades],
       hasC4: displayActor.hasC4,
+      hasDefuseKit: displayActor.hasDefuseKit,
       bomb: { ...this.bomb },
       crosshairSpread: (() => {
         const vh = this.container.clientHeight || window.innerHeight || 720;
@@ -3640,6 +4251,8 @@ export class GameEngine {
       interactPrompt,
       killFeed: [...this.killFeed],
       radarBlips,
+      teammateOverlays,
+      xrayEnabled: this.xrayEnabled,
       localYaw: displayActor.yaw,
       localX: displayActor.x,
       localZ: displayActor.z,

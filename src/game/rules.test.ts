@@ -4,6 +4,7 @@ import {
   calculateBulletDamage,
   calculateHeExplosionDamage,
   canBuyWeapon,
+  canPickUpGrenade,
   canPlantBombNow,
   checkMatchWinner,
   computeLossBonus,
@@ -11,8 +12,10 @@ import {
   computeWeaponSpread,
   ECONOMY_CONSTANTS,
   getArmorPurchaseCost,
+  getDefuseDurationSeconds,
   getKillReward,
   isHalftimeRound,
+  selectDeathDrops,
 } from './rules';
 import { getBotDifficultyTuning } from './botAI';
 import {
@@ -21,6 +24,7 @@ import {
   hasLineOfSight,
   isInBuyZone,
   MAP_LIST,
+  MAPS,
   setActiveMap,
   SITE_ZONES,
 } from './mapData';
@@ -186,6 +190,20 @@ test('all 5 maps: blocked spawn sightlines, buy zones, and valid waypoint paths'
     assert.ok(pathDefA.length >= 2 && pathDefA[pathDefA.length - 1] === 'a_site', `${mapDef.id} def->A`);
     assert.ok(pathDefB.length >= 2 && pathDefB[pathDefB.length - 1] === 'b_site', `${mapDef.id} def->B`);
     assert.ok(pathMid.length >= 2 && pathMid[pathMid.length - 1] === 'mid_center', `${mapDef.id} atk->Mid`);
+
+    const fullMap = MAPS[mapDef.id];
+    const wpById = new Map(fullMap.waypoints.map((w) => [w.id, w]));
+    for (const w of fullMap.waypoints) {
+      for (const nid of w.neighbors) {
+        const nb = wpById.get(nid);
+        assert.ok(nb, `${mapDef.id} missing neighbor ${nid}`);
+        assert.equal(
+          hasLineOfSight(w.x, 1.0, w.z, nb.x, 1.0, nb.z),
+          true,
+          `${mapDef.id} edge ${w.id} -> ${nid} crosses a wall`
+        );
+      }
+    }
   }
 
   setActiveMap('sandline');
@@ -219,7 +237,7 @@ test('match progression: halftime and winner resolution', () => {
 });
 
 test('ballistics & movement: stationary accuracy is 0, slow walk < running, SMG running < rifle running', () => {
-  const awpStill = computeWeaponSpread({
+  const awpScopedStill = computeWeaponSpread({
     weaponId: 'awp',
     horizontalSpeed: 0,
     isCrouching: false,
@@ -227,7 +245,17 @@ test('ballistics & movement: stationary accuracy is 0, slow walk < running, SMG 
     recoilBloom: 0,
     scopeZoom: 1,
   });
-  assert.equal(awpStill, 0);
+  assert.equal(awpScopedStill, 0);
+
+  const awpUnscopedStill = computeWeaponSpread({
+    weaponId: 'awp',
+    horizontalSpeed: 0,
+    isCrouching: false,
+    isAirborne: false,
+    recoilBloom: 0,
+    scopeZoom: 0,
+  });
+  assert.ok(awpUnscopedStill > 0.03, 'unscoped AWP should not be pinpoint accurate');
 
   const akStill = computeWeaponSpread({
     weaponId: 'ak47',
@@ -287,3 +315,192 @@ test('bomb planting: requires standing still on ground', () => {
     false
   );
 });
+
+test('death drops: drops most expensive weapon, c4, all util, and defuse kit', () => {
+  const fullLoadoutDrop = selectDeathDrops({
+    primary: { id: 'awp', mag: 4, reserve: 20 },
+    secondary: { id: 'deagle', mag: 7, reserve: 35 },
+    grenades: ['smoke', 'flashbang', 'flashbang', 'he'],
+    hasC4: true,
+    hasDefuseKit: true,
+  });
+  assert.deepEqual(fullLoadoutDrop.weapon, { slot: 1, id: 'awp', mag: 4, reserve: 20 });
+  assert.deepEqual(fullLoadoutDrop.grenades, ['smoke', 'flashbang', 'flashbang', 'he']);
+  assert.equal(fullLoadoutDrop.c4, true);
+  assert.equal(fullLoadoutDrop.defuseKit, true);
+
+  const pistolOnlyDrop = selectDeathDrops({
+    primary: null,
+    secondary: { id: 'deagle', mag: 5, reserve: 28 },
+    grenades: ['incendiary'],
+    hasC4: false,
+    hasDefuseKit: true,
+  });
+  assert.deepEqual(pistolOnlyDrop.weapon, { slot: 2, id: 'deagle', mag: 5, reserve: 28 });
+  assert.deepEqual(pistolOnlyDrop.grenades, ['incendiary']);
+  assert.equal(pistolOnlyDrop.c4, false);
+  assert.equal(pistolOnlyDrop.defuseKit, true);
+});
+
+test('utility pickups & defuse kit timing', () => {
+  assert.equal(canPickUpGrenade([], 'flashbang'), true);
+  assert.equal(canPickUpGrenade(['flashbang'], 'flashbang'), true);
+  assert.equal(canPickUpGrenade(['flashbang', 'flashbang'], 'flashbang'), false);
+  assert.equal(canPickUpGrenade(['smoke'], 'smoke'), false);
+  assert.equal(canPickUpGrenade(['molotov'], 'incendiary'), false);
+  assert.equal(canPickUpGrenade(['smoke', 'he', 'flashbang', 'flashbang'], 'molotov'), false);
+
+  assert.equal(getDefuseDurationSeconds(false), 10);
+  assert.equal(getDefuseDurationSeconds(true), 5);
+});
+
+import { createBotBrain, evaluateBotVision, stepBotBrain } from './botAI';
+import type { ActorState, BombState } from './types';
+
+function makeTestActor(overrides: Partial<ActorState>): ActorState {
+  return {
+    id: 'a1',
+    name: 'TestBot',
+    team: 'attackers',
+    isBot: true,
+    isLocal: false,
+    alive: true,
+    hp: 100,
+    armor: 100,
+    hasHelmet: true,
+    cash: 800,
+    kills: 0,
+    deaths: 0,
+    headshots: 0,
+    x: 0,
+    y: 0,
+    z: 0,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    yaw: 0,
+    pitch: 0,
+    crouching: false,
+    grounded: true,
+    activeSlot: 1,
+    primary: { id: 'ak47', mag: 30, reserve: 90 },
+    secondary: { id: 'glock18', mag: 20, reserve: 120 },
+    knife: 'bayonet',
+    grenades: [],
+    hasC4: false,
+    hasDefuseKit: false,
+    blindTimer: 0,
+    inBuyZone: false,
+    hurtFlash: 0,
+    ...overrides,
+  };
+}
+
+const TEST_BOMB: BombState = {
+  status: 'carried',
+  carrierId: null,
+  site: null,
+  x: 0,
+  y: 0,
+  z: 0,
+  timerRemaining: 40,
+  plantProgress: 0,
+  defuseProgress: 0,
+  defuserId: null,
+};
+
+test('bots: reload uses weapon reload duration instead of finishing instantaneously', () => {
+  setActiveMap('sandline');
+  const bot = makeTestActor({
+    id: 'bot1',
+    x: 0,
+    z: 20,
+    yaw: 0,
+    primary: { id: 'ak47', mag: 0, reserve: 90 },
+  });
+  const brain = createBotBrain('bot1', 0);
+
+  const step1 = stepBotBrain({
+    bot,
+    brain,
+    allActors: [bot],
+    bomb: TEST_BOMB,
+    smokes: [],
+    difficulty: 55,
+    isBuyPhase: false,
+    dt: 0.05,
+  });
+  assert.equal(step1.startedReload, true);
+  assert.equal(step1.completedReload, false);
+  assert.equal(step1.wantFire, false);
+  assert.ok(brain.reloadTimer > 2.0);
+
+  const stepMid = stepBotBrain({
+    bot,
+    brain,
+    allActors: [bot],
+    bomb: TEST_BOMB,
+    smokes: [],
+    difficulty: 55,
+    isBuyPhase: false,
+    dt: 1.0,
+  });
+  assert.equal(stepMid.completedReload, false);
+  assert.equal(stepMid.wantFire, false);
+
+  const stepDone = stepBotBrain({
+    bot,
+    brain,
+    allActors: [bot],
+    bomb: TEST_BOMB,
+    smokes: [],
+    difficulty: 55,
+    isBuyPhase: false,
+    dt: 2.0,
+  });
+  assert.equal(stepDone.completedReload, true);
+  assert.equal(brain.reloadTimer, 0);
+});
+
+test('bots: tactical FOV vision rejects enemies behind bot while legacyVision preserves 360-deg vision', () => {
+  setActiveMap('dust2');
+  // At mid (x = 0, z = 4 facing -Z yaw=0): enemy in front at z=-10 is visible, behind at z=+16 is outside FOV
+  const bot = makeTestActor({ id: 'atk1', team: 'attackers', x: 0, z: 4, yaw: 0 });
+  const enemyBehind = makeTestActor({ id: 'def1', team: 'defenders', x: 0, z: 16, yaw: Math.PI });
+  const enemyFront = makeTestActor({ id: 'def2', team: 'defenders', x: 0, z: -8, yaw: Math.PI });
+
+  const behindOnly = evaluateBotVision({
+    bot,
+    allActors: [bot, enemyBehind],
+    smokes: [],
+    aggroRange: 40,
+    fovHalfCos: Math.cos(58 * (Math.PI / 180)),
+  });
+  assert.equal(behindOnly, null, 'enemy directly behind at 12m must not be spotted in FOV mode');
+
+  const frontScan = evaluateBotVision({
+    bot,
+    allActors: [bot, enemyBehind, enemyFront],
+    smokes: [],
+    aggroRange: 40,
+    fovHalfCos: Math.cos(58 * (Math.PI / 180)),
+  });
+  assert.ok(frontScan && frontScan.enemy.id === 'def2');
+
+  const legacyBrain = createBotBrain('atk1', 0);
+  legacyBrain.reactionCooldown = 0;
+  const legacyCmd = stepBotBrain({
+    bot,
+    brain: legacyBrain,
+    allActors: [bot, enemyBehind],
+    bomb: TEST_BOMB,
+    smokes: [],
+    difficulty: 100,
+    isBuyPhase: false,
+    dt: 0.05,
+    legacyVision: true,
+  });
+  assert.equal(legacyCmd.wantFire, true, 'Legacy bots keep 360-deg instant detection');
+});
+
+

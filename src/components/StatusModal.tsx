@@ -2,6 +2,8 @@ import type { HudSnapshot } from '../game/types';
 
 interface StatusModalProps {
   hud: HudSnapshot;
+  sensitivity: number;
+  onChangeSensitivity: (val: number) => void;
   onResume: () => void;
   onRestart: () => void;
   onMainMenu: () => void;
@@ -9,6 +11,8 @@ interface StatusModalProps {
 
 export function StatusModal({
   hud,
+  sensitivity,
+  onChangeSensitivity,
   onResume,
   onRestart,
   onMainMenu,
@@ -34,10 +38,30 @@ export function StatusModal({
             <h2 className="text-2xl font-bold uppercase tracking-wider text-white">
               Match Paused
             </h2>
-            <p className="text-xs text-slate-400 mt-1 mb-5">
+            <p className="text-xs text-slate-400 mt-1 mb-4">
               Round {hud.roundNumber} of {hud.maxRounds} · ATK {hud.attackerScore} –{' '}
               {hud.defenderScore} DEF
             </p>
+            <div className="mb-4 p-3 rounded bg-[#0b0e14] border border-white/10">
+              <div className="flex items-center justify-between text-xs mb-1.5">
+                <label htmlFor="pause-sensitivity-slider" className="font-medium text-slate-300">
+                  Mouse Sensitivity
+                </label>
+                <span className="font-tactical-mono text-sky-300 font-semibold">
+                  {sensitivity.toFixed(2)}x
+                </span>
+              </div>
+              <input
+                id="pause-sensitivity-slider"
+                type="range"
+                min={0.2}
+                max={3.0}
+                step={0.05}
+                value={sensitivity}
+                onChange={(e) => onChangeSensitivity(Number(e.target.value))}
+                className="w-full accent-sky-400 cursor-pointer"
+              />
+            </div>
             <div className="space-y-2.5">
               <button
                 type="button"

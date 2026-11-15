@@ -13,6 +13,7 @@ export interface OperatorMeshHandle {
   helmetMesh: THREE.Mesh;
   c4BackMesh: THREE.Mesh;
   shadowDisc: THREE.Mesh;
+  xrayMeshes: THREE.Mesh[];
 }
 
 export interface HitboxUserData {
@@ -38,14 +39,34 @@ export function createOperatorModel(actorId: string, team: Team): OperatorMeshHa
   const bootMat = makeHitboxMaterial(0x1f2124, 0.78, 0.1);
   const helmetMat = makeHitboxMaterial(isAtk ? 0x5c4738 : 0x222e3d, 0.45, 0.35);
   const visorMat = makeHitboxMaterial(0x182028, 0.18, 0.85);
+  const xrayMat = new THREE.MeshBasicMaterial({
+    color: isAtk ? 0xf59e0b : 0x38bdf8,
+    transparent: true,
+    opacity: 0.45,
+    depthTest: true,
+    depthFunc: THREE.GreaterDepth,
+    depthWrite: false,
+  });
 
   const hitboxes: THREE.Mesh[] = [];
+  const xrayMeshes: THREE.Mesh[] = [];
   const tagMesh = (mesh: THREE.Mesh, zone: HitboxZone) => {
     mesh.userData = { actorId, zone } satisfies HitboxUserData;
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     hitboxes.push(mesh);
     return mesh;
+  };
+  const addXrayClone = (parent: THREE.Object3D, source: THREE.Mesh) => {
+    const xMesh = new THREE.Mesh(source.geometry, xrayMat);
+    xMesh.position.copy(source.position);
+    xMesh.rotation.copy(source.rotation);
+    xMesh.scale.setScalar(1.04);
+    xMesh.renderOrder = 999;
+    xMesh.visible = false;
+    parent.add(xMesh);
+    xrayMeshes.push(xMesh);
+    return xMesh;
   };
 
   // Grounded radial contact shadow disc
@@ -69,10 +90,12 @@ export function createOperatorModel(actorId: string, team: Team): OperatorMeshHa
   const leftLeg = tagMesh(new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.76, 0.2), clothMat), 'limb');
   leftLeg.position.set(-0.12, 0.42, 0);
   bodyGroup.add(leftLeg);
+  addXrayClone(bodyGroup, leftLeg);
 
   const rightLeg = tagMesh(new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.76, 0.2), clothMat), 'limb');
   rightLeg.position.set(0.12, 0.42, 0);
   bodyGroup.add(rightLeg);
+  addXrayClone(bodyGroup, rightLeg);
 
   // Boots
   const lBoot = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.14, 0.26), bootMat);
@@ -87,6 +110,7 @@ export function createOperatorModel(actorId: string, team: Team): OperatorMeshHa
   const torso = tagMesh(new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.64, 0.28), clothMat), 'chest');
   torso.position.set(0, 1.12, 0);
   bodyGroup.add(torso);
+  addXrayClone(bodyGroup, torso);
 
   // Tactical Kevlar Plate Carrier
   const vest = tagMesh(new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.44, 0.32), rigMat), 'chest');
@@ -108,12 +132,14 @@ export function createOperatorModel(actorId: string, team: Team): OperatorMeshHa
   leftArm.rotation.x = 0.65;
   leftArm.rotation.z = 0.15;
   bodyGroup.add(leftArm);
+  addXrayClone(bodyGroup, leftArm);
 
   const rightArm = tagMesh(new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.52, 0.16), clothMat), 'limb');
   rightArm.position.set(0.31, 1.18, -0.14);
   rightArm.rotation.x = 0.65;
   rightArm.rotation.z = -0.15;
   bodyGroup.add(rightArm);
+  addXrayClone(bodyGroup, rightArm);
 
   // Head & Helmet Group (Head hitbox)
   const headGroup = new THREE.Group();
@@ -122,6 +148,7 @@ export function createOperatorModel(actorId: string, team: Team): OperatorMeshHa
 
   const head = tagMesh(new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.27, 0.25), skinMat), 'head');
   headGroup.add(head);
+  addXrayClone(headGroup, head);
 
   const helmetMesh = tagMesh(new THREE.Mesh(new THREE.BoxGeometry(0.29, 0.17, 0.29), helmetMat), 'head');
   helmetMesh.position.set(0, 0.08, 0);
@@ -155,5 +182,6 @@ export function createOperatorModel(actorId: string, team: Team): OperatorMeshHa
     helmetMesh,
     c4BackMesh,
     shadowDisc,
+    xrayMeshes,
   };
 }

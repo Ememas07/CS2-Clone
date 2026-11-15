@@ -10,6 +10,7 @@ interface TacticalHUDProps {
   onOpenBuyMenu: () => void;
   onSelectSlot: (slot: WeaponSlot) => void;
   onToggleMute: () => void;
+  onToggleXray: () => void;
   onToggleFullscreen: () => void;
   onPause: () => void;
 }
@@ -28,6 +29,7 @@ export function TacticalHUD({
   onOpenBuyMenu,
   onSelectSlot,
   onToggleMute,
+  onToggleXray,
   onToggleFullscreen,
   onPause,
 }: TacticalHUDProps) {
@@ -164,9 +166,68 @@ export function TacticalHUD({
   const isGun = hud.activeSlot === 1 || hud.activeSlot === 2;
   const spec = WEAPONS[hud.activeWeaponId];
   const canBuyNow = hud.canBuy && hud.localAlive;
+  const lowAmmoThreshold = spec ? Math.max(2, Math.ceil(spec.magSize * 0.25)) : 3;
+  const isLowAmmo =
+    isGun && Boolean(spec) && hud.mag <= lowAmmoThreshold && hud.reserve > 0 && !hud.isReloading;
+  const isOutOfAmmo = isGun && hud.mag === 0 && hud.reserve === 0 && !hud.isReloading;
 
   return (
     <div className="fixed inset-0 z-10 pointer-events-none select-none">
+      {/* Projected Teammate & Spectate X-Ray Overhead HUD */}
+      {!showScoreboard && !buyMenuOpen && hud.teammateOverlays.length > 0 && (
+        <div className="fixed inset-0 pointer-events-none overflow-hidden">
+          {hud.teammateOverlays.map((ov) => {
+            const isAtk = ov.team === 'attackers';
+            const gearLabel = ov.primaryName ?? ov.secondaryName ?? ov.activeWeaponName;
+            return (
+              <div
+                key={ov.id}
+                className="absolute -translate-x-1/2 -translate-y-full px-2 py-1 rounded bg-[#0b0e14]/82 border border-white/15 shadow-md min-w-[108px] max-w-[168px]"
+                style={{
+                  left: `${ov.xPct}%`,
+                  top: `${ov.yPct}%`,
+                }}
+              >
+                <div className="flex items-center justify-between gap-2 text-[10px] leading-tight font-bold">
+                  <span className={`truncate ${isAtk ? 'text-amber-300' : 'text-sky-300'}`}>
+                    {ov.name}
+                  </span>
+                  <span
+                    className={`font-tactical-mono tabular-nums ${
+                      ov.hp <= 25 ? 'text-rose-400' : 'text-white'
+                    }`}
+                  >
+                    {ov.hp}
+                  </span>
+                </div>
+                <div className="h-1 bg-slate-800 rounded-xs overflow-hidden my-0.5">
+                  <div
+                    className={`h-full ${
+                      ov.hp <= 25
+                        ? 'bg-rose-500'
+                        : isAtk
+                          ? 'bg-amber-400'
+                          : 'bg-sky-400'
+                    }`}
+                    style={{ width: `${Math.max(0, Math.min(100, ov.hp))}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-1.5 text-[9px] text-slate-300 leading-tight font-tactical-mono">
+                  <span className="truncate text-slate-200">{gearLabel}</span>
+                  <span className="shrink-0 flex items-center gap-1">
+                    {ov.armor > 0 && <span className="text-sky-300">A{ov.armor}</span>}
+                    {ov.hasC4 && <span className="text-amber-300 font-bold">C4</span>}
+                    {ov.hasDefuseKit && <span className="text-emerald-300 font-bold">KIT</span>}
+                    {ov.grenadeCount > 0 && <span className="text-slate-300">U{ov.grenadeCount}</span>}
+                    {ov.isReloading && <span className="text-rose-300 font-bold">RLD</span>}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* Flashbang blind overlay */}
       {hud.blindAlpha > 0.01 && (
         <div
@@ -383,6 +444,21 @@ export function TacticalHUD({
               <span>←</span>
               <span>Hub</span>
             </a>
+            {hud.mode === 'spectate' && (
+              <button
+                type="button"
+                tabIndex={-1}
+                aria-label="Toggle spectator X-Ray"
+                onClick={onToggleXray}
+                className={`px-2.5 py-1 text-xs font-semibold border rounded transition-colors ${
+                  hud.xrayEnabled
+                    ? 'bg-sky-600/90 hover:bg-sky-500 text-white border-sky-300/40'
+                    : 'bg-[#0b0e14]/88 hover:bg-slate-800 text-slate-300 border-white/15'
+                }`}
+              >
+                {hud.xrayEnabled ? 'X-Ray: ON [X]' : 'X-Ray: OFF [X]'}
+              </button>
+            )}
             <button
               type="button"
               tabIndex={-1}
@@ -476,7 +552,7 @@ export function TacticalHUD({
         {hud.bomb.status === 'defusing' && (
           <div className="w-60 bg-[#0b0e14]/92 border border-sky-400/50 rounded p-2 text-center">
             <div className="text-xs font-bold text-sky-300 uppercase mb-1">
-              Defusing C4...
+              {hud.hasDefuseKit ? 'Defusing C4 (Kit · 5s)...' : 'Defusing C4 (10s)...'}
             </div>
             <div className="h-2 bg-slate-800 rounded overflow-hidden">
               <div
@@ -484,6 +560,18 @@ export function TacticalHUD({
                 style={{ width: `${Math.round(hud.bomb.defuseProgress * 100)}%` }}
               />
             </div>
+          </div>
+        )}
+
+        {hud.localAlive && !buyMenuOpen && !showScoreboard && isLowAmmo && (
+          <div className="px-3.5 py-1 bg-[#0b0e14]/92 border border-amber-400/70 rounded text-xs font-bold uppercase tracking-widest text-amber-300 shadow">
+            RELOAD [R]
+          </div>
+        )}
+
+        {hud.localAlive && !buyMenuOpen && !showScoreboard && isOutOfAmmo && (
+          <div className="px-3.5 py-1 bg-[#0b0e14]/92 border border-rose-500/70 rounded text-xs font-bold uppercase tracking-widest text-rose-400 shadow">
+            NO AMMO
           </div>
         )}
 
@@ -525,7 +613,7 @@ export function TacticalHUD({
               {hud.spectatingCanControl && (
                 <span className="text-amber-300 font-semibold"> · [E] Take Control</span>
               )}
-              {hud.mode === 'spectate' && ' · Tab Scoreboard · Esc Pause'}
+              {hud.mode === 'spectate' && ' · X X-Ray · Tab Scoreboard · Esc Pause'}
             </div>
           </div>
         )}
@@ -581,6 +669,11 @@ export function TacticalHUD({
               <span className="text-xl font-bold tabular-nums leading-none text-sky-300">
                 {hud.armor}
               </span>
+              {hud.hasDefuseKit && (
+                <span className="ml-1 px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/40 text-[10px] font-bold text-emerald-300">
+                  KIT
+                </span>
+              )}
             </div>
 
             {/* Cash */}
@@ -600,31 +693,49 @@ export function TacticalHUD({
               <div className="text-xs font-bold uppercase tracking-wider text-amber-300">
                 {hud.activeWeaponName}
               </div>
-              <div className="text-[11px] text-slate-400">
+              <div
+                className={`text-[11px] ${
+                  hud.isReloading
+                    ? 'text-sky-300 font-semibold'
+                    : isLowAmmo
+                      ? 'text-amber-300 font-bold'
+                      : isOutOfAmmo
+                        ? 'text-rose-400 font-bold'
+                        : 'text-slate-400'
+                }`}
+              >
                 {hud.isReloading
                   ? 'RELOADING...'
-                  : spec?.hasSilencer
-                    ? hud.silenced
-                      ? 'SUPPRESSED [RMB]'
-                      : 'UNSUPPRESSED [RMB]'
-                    : spec?.hasBurst
-                      ? hud.burstMode
-                        ? '3-ROUND BURST [RMB]'
-                        : 'SEMI-AUTO [RMB]'
-                      : spec?.hasScope
-                        ? '2x/4x SCOPE [RMB]'
-                        : spec?.category === 'knife'
-                          ? 'SLASH / STAB [RMB]'
-                          : spec?.category === 'grenade'
-                            ? 'THROW / UNDERHAND [RMB]'
-                            : 'HOLD E AT SITE'}
+                  : isLowAmmo
+                    ? 'RELOAD [R]'
+                    : isOutOfAmmo
+                      ? 'EMPTY'
+                      : spec?.hasSilencer
+                        ? hud.silenced
+                          ? 'SUPPRESSED [RMB]'
+                          : 'UNSUPPRESSED [RMB]'
+                        : spec?.hasBurst
+                          ? hud.burstMode
+                            ? '3-ROUND BURST [RMB]'
+                            : 'SEMI-AUTO [RMB]'
+                          : spec?.hasScope
+                            ? '2x/4x SCOPE [RMB]'
+                            : spec?.category === 'knife'
+                              ? 'SLASH / STAB [RMB]'
+                              : spec?.category === 'grenade'
+                                ? 'THROW / UNDERHAND [RMB]'
+                                : spec?.category === 'c4'
+                                  ? 'HOLD E AT SITE'
+                                  : spec?.automatic
+                                    ? 'FULL-AUTO'
+                                    : 'SEMI-AUTO'}
               </div>
             </div>
             {isGun && (
               <div className="border-l border-white/10 pl-4 flex items-baseline gap-1 tabular-nums">
                 <span
                   className={`text-2xl font-bold leading-none ${
-                    hud.mag <= 3 ? 'text-rose-400' : 'text-white'
+                    hud.mag <= lowAmmoThreshold ? 'text-rose-400' : 'text-white'
                   }`}
                 >
                   {hud.mag}

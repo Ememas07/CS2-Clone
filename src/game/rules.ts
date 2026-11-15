@@ -18,6 +18,7 @@ export const ECONOMY_CONSTANTS = {
   KEVLAR_PRICE: 650,
   KEVLAR_HELMET_PRICE: 1000,
   HELMET_UPGRADE_PRICE: 350,
+  DEFUSE_KIT_PRICE: 400,
   BOMB_PLANT_REWARD: 300,
 };
 
@@ -26,7 +27,8 @@ export const ROUND_CONSTANTS = {
   LIVE_ROUND_SECONDS: 120, // 2:00 round timer
   C4_DETONATION_SECONDS: 40,
   C4_PLANT_SECONDS: 3.2,
-  C4_DEFUSE_SECONDS: 5.0,
+  C4_DEFUSE_SECONDS: 10.0,
+  C4_DEFUSE_KIT_SECONDS: 5.0,
   ROUND_END_DELAY_SECONDS: 4.0,
   DEFAULT_MAX_ROUNDS: 12, // MR6 competitive (6 rounds per half, first to 7)
 };
@@ -200,6 +202,11 @@ export function computeWeaponSpread(params: {
     spread += spec.moveSpread * moveFactor;
   }
 
+  // Unscoped sniper rifles (e.g. AWP hipfire) remain inaccurate even when standing still
+  if (spec.hasScope && params.scopeZoom === 0) {
+    spread += 0.055;
+  }
+
   if (params.isCrouching) {
     spread *= 0.72;
   }
@@ -317,3 +324,66 @@ export function checkMatchWinner(
   }
   return null;
 }
+
+export function getDefuseDurationSeconds(hasDefuseKit: boolean): number {
+  return hasDefuseKit
+    ? ROUND_CONSTANTS.C4_DEFUSE_KIT_SECONDS
+    : ROUND_CONSTANTS.C4_DEFUSE_SECONDS;
+}
+
+export function canPickUpGrenade(
+  currentGrenades: ReadonlyArray<ActorState['grenades'][number]>,
+  candidate: ActorState['grenades'][number]
+): boolean {
+  if (currentGrenades.length >= 4) return false;
+  const sameCount = currentGrenades.filter((g) => g === candidate).length;
+  if (candidate === 'flashbang') return sameCount < 2;
+  if (candidate === 'molotov' || candidate === 'incendiary') {
+    return !currentGrenades.some((g) => g === 'molotov' || g === 'incendiary');
+  }
+  return sameCount < 1;
+}
+
+export interface DeathDropPlan {
+  weapon: {
+    slot: 1 | 2;
+    id: NonNullable<ActorState['primary']>['id'];
+    mag: number;
+    reserve: number;
+  } | null;
+  grenades: ActorState['grenades'];
+  c4: boolean;
+  defuseKit: boolean;
+}
+
+export function selectDeathDrops(
+  actor: Pick<ActorState, 'primary' | 'secondary' | 'grenades' | 'hasC4' | 'hasDefuseKit'>
+): DeathDropPlan {
+  const primaryPrice = actor.primary ? (WEAPONS[actor.primary.id]?.price ?? 0) : -1;
+  const secondaryPrice = actor.secondary ? (WEAPONS[actor.secondary.id]?.price ?? 0) : -1;
+
+  let weapon: DeathDropPlan['weapon'] = null;
+  if (actor.primary && primaryPrice >= secondaryPrice) {
+    weapon = {
+      slot: 1,
+      id: actor.primary.id,
+      mag: actor.primary.mag,
+      reserve: actor.primary.reserve,
+    };
+  } else if (actor.secondary) {
+    weapon = {
+      slot: 2,
+      id: actor.secondary.id,
+      mag: actor.secondary.mag,
+      reserve: actor.secondary.reserve,
+    };
+  }
+
+  return {
+    weapon,
+    grenades: [...actor.grenades],
+    c4: actor.hasC4,
+    defuseKit: actor.hasDefuseKit,
+  };
+}
+
