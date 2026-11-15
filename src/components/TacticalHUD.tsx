@@ -337,6 +337,15 @@ export function TacticalHUD({
         {/* Top-Right: Mute / Pause + Kill Feed */}
         <div className="flex flex-col items-end gap-2 min-w-[240px]">
           <div className="flex items-center gap-1.5 pointer-events-auto" data-ui-interactive="true">
+            <a
+              href="/"
+              title="Return to Hub"
+              aria-label="Return to Hub"
+              className="px-2.5 py-1 text-xs font-semibold bg-[#0b0e14]/88 hover:bg-slate-800 text-amber-400 border border-white/15 rounded flex items-center gap-1 cursor-pointer transition-colors"
+            >
+              <span>←</span>
+              <span>Hub</span>
+            </a>
             <button
               type="button"
               tabIndex={-1}

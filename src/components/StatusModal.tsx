@@ -60,6 +60,12 @@ export function StatusModal({
               >
                 Return to Main Menu
               </button>
+              <a
+                href="/"
+                className="w-full py-2.5 px-4 bg-transparent hover:bg-white/5 text-amber-400 font-semibold text-sm rounded border border-white/10 transition-colors text-center block"
+              >
+                Exit to AI Studio Hub
+              </a>
             </div>
           </>
         ) : (
@@ -121,6 +127,12 @@ export function StatusModal({
               >
                 Main Menu
               </button>
+              <a
+                href="/"
+                className="w-full py-2.5 px-4 bg-transparent hover:bg-white/5 text-amber-400 font-semibold text-sm rounded border border-white/10 transition-colors text-center block"
+              >
+                Exit to AI Studio Hub
+              </a>
             </div>
           </>
         )}
