@@ -375,6 +375,29 @@ class TacticalAudioEngine {
     });
   }
 
+  public playBoltAction(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const clicks: Array<[number, number, number]> = [
+      [0, 1280, 520],
+      [0.14, 960, 410],
+      [0.42, 1140, 480],
+    ];
+    for (const [offset, fStart, fEnd] of clicks) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(fStart, now + offset);
+      osc.frequency.exponentialRampToValueAtTime(fEnd, now + offset + 0.035);
+      gain.gain.setValueAtTime(0.09, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.04);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.045);
+    }
+  }
+
   public playHeadshotDink(distanceMeters = 0): void {
     const ctx = this.ensureContext();
     if (!ctx) return;
@@ -390,6 +413,24 @@ class TacticalAudioEngine {
     osc.connect(gain).connect(ctx.destination);
     osc.start(now);
     osc.stop(now + 0.11);
+  }
+
+  public playKillConfirm(headshot = false): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const notes = headshot ? [980, 1480] : [740, 1100];
+    notes.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now + i * 0.045);
+      gain.gain.setValueAtTime(0.11, now + i * 0.045);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.045 + 0.12);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + i * 0.045);
+      osc.stop(now + i * 0.045 + 0.13);
+    });
   }
 
   public playFootstep(): void {

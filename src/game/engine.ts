@@ -31,6 +31,7 @@ import {
   calculateBulletDamage,
   calculateHeExplosionDamage,
   canBuyWeapon,
+  canPlantBombNow,
   checkMatchWinner,
   clampCash,
   computeRoundEndCash,
@@ -187,6 +188,11 @@ export class GameEngine {
   private recoilBloom = 0;
   private inspectTimer = 0;
   private meleeAnimTimer = 0;
+  private equipAnimTimer = 0;
+  private equipAnimDuration = 0.3;
+  private awpBoltTimer = 0;
+  private readonly awpBoltDuration = 1.15;
+  private awpShellEjected = false;
   private reloadTimer = 0;
   private fireCooldown = 0;
   private burstQueue = 0;
@@ -208,12 +214,16 @@ export class GameEngine {
   private mesaMeshes: THREE.Mesh[] = [];
   private previousSlot: WeaponSlot = 2;
   private expectingUnlock = false;
+  private pointerLockWarmupEvents = 0;
   private onEscapePause?: () => void;
   private spectateTargetId: string | null = null;
   private isHostAuthority = true;
   private actors: ActorState[] = [];
   private botBrains = new Map<string, BotBrainState>();
+  private defaultLocalActorId = 'local';
   private localActorId = 'local';
+  private controllingBotId: string | null = null;
+  private lastRoundStartVoiceRound = 0;
 
   private roundNumber = 1;
   private attackerScore = 0;
@@ -251,6 +261,8 @@ export class GameEngine {
   private scopeZoom: 0 | 1 | 2 = 0;
   private hitmarker: 'none' | 'body' | 'head' = 'none';
   private hitmarkerTimer = 0;
+  private killConfirm: HudSnapshot['killConfirm'] = null;
+  private killConfirmTimer = 0;
   private damageFlash = 0;
   private keys = new Set<string>();
   private mouseDownLeft = false;
@@ -259,6 +271,7 @@ export class GameEngine {
   private hudEmitAccum = 0;
   private netSyncAccum = 0;
   private roundSyncAccum = 0;
+  private resizeObserver: ResizeObserver | null = null;
 
   private readonly _raycaster = new THREE.Raycaster();
   private readonly _vec3A = new THREE.Vector3();
@@ -306,7 +319,12 @@ export class GameEngine {
     this.renderer.setPixelRatio(
       this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2)
     );
-    this.renderer.setSize(this.container.clientWidth || 1280, this.container.clientHeight || 720);
+    const initW = Math.max(1, this.container.clientWidth || window.innerWidth || 1280);
+    const initH = Math.max(1, this.container.clientHeight || window.innerHeight || 720);
+    this.renderer.setSize(initW, initH, false);
+    this.renderer.domElement.style.display = 'block';
+    this.renderer.domElement.style.width = '100%';
+    this.renderer.domElement.style.height = '100%';
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.container.innerHTML = '';
@@ -316,8 +334,7 @@ export class GameEngine {
     this.scene.background = new THREE.Color(0xd5e6f5);
     this.scene.fog = new THREE.Fog(0xdfd3bf, 48, 165);
 
-    const aspect =
-      (this.container.clientWidth || 1280) / Math.max(1, this.container.clientHeight || 720);
+    const aspect = initW / initH;
     this.camera = new THREE.PerspectiveCamera(78, aspect, 0.05, 260);
     this.camera.rotation.order = 'YXZ';
     this.scene.add(this.camera);
@@ -574,6 +591,11 @@ export class GameEngine {
 
   private bindEvents(): void {
     window.addEventListener('resize', this.handleResize);
+    document.addEventListener('fullscreenchange', this.handleResize);
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(() => this.handleResize());
+      this.resizeObserver.observe(this.container);
+    }
     window.addEventListener('keydown', this.handleGlobalShortcutBlock, { capture: true });
     window.addEventListener('keydown', this.handleKeyDown);
     window.addEventListener('keyup', this.handleKeyUp);
@@ -590,6 +612,9 @@ export class GameEngine {
 
   private unbindEvents(): void {
     window.removeEventListener('resize', this.handleResize);
+    document.removeEventListener('fullscreenchange', this.handleResize);
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     window.removeEventListener('keydown', this.handleGlobalShortcutBlock, { capture: true });
     window.removeEventListener('keydown', this.handleKeyDown);
     window.removeEventListener('keyup', this.handleKeyUp);
@@ -640,11 +665,11 @@ export class GameEngine {
   };
 
   private handleResize = (): void => {
-    const w = this.container.clientWidth || window.innerWidth;
-    const h = Math.max(1, this.container.clientHeight || window.innerHeight);
+    const w = Math.max(1, this.container.clientWidth || window.innerWidth || 1280);
+    const h = Math.max(1, this.container.clientHeight || window.innerHeight || 720);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    this.renderer.setSize(w, h);
+    this.renderer.setSize(w, h, false);
     this.renderer.render(this.scene, this.camera);
   };
 
@@ -667,6 +692,10 @@ export class GameEngine {
   private handlePointerLockChange = (): void => {
     const wasLocked = this.pointerLocked;
     this.pointerLocked = document.pointerLockElement === this.renderer.domElement;
+    this.renderer.domElement.style.cursor = this.pointerLocked ? 'none' : 'default';
+    if (!wasLocked && this.pointerLocked) {
+      this.pointerLockWarmupEvents = 2;
+    }
     if (wasLocked && !this.pointerLocked) {
       if (this.expectingUnlock) {
         this.expectingUnlock = false;
@@ -687,10 +716,28 @@ export class GameEngine {
   public requestPointerLock(): void {
     if (this.screen !== 'playing') return;
     soundEngine.unlock();
+    const el = this.renderer.domElement;
     try {
-      this.renderer.domElement.requestPointerLock?.();
+      const maybePromise = (
+        el.requestPointerLock as unknown as (opts?: {
+          unadjustedMovement?: boolean;
+        }) => Promise<void> | undefined
+      )?.({ unadjustedMovement: true });
+      if (maybePromise && typeof maybePromise.catch === 'function') {
+        maybePromise.catch(() => {
+          try {
+            el.requestPointerLock?.();
+          } catch {
+            // Ignore in restricted environments
+          }
+        });
+      }
     } catch {
-      // Ignore in headless environments
+      try {
+        el.requestPointerLock?.();
+      } catch {
+        // Ignore in headless environments
+      }
     }
   }
 
@@ -733,10 +780,12 @@ export class GameEngine {
             'Escape',
           ]);
         }
+        requestAnimationFrame(() => this.handleResize());
         return true;
       } else {
         kb?.unlock?.();
         await document.exitFullscreen();
+        requestAnimationFrame(() => this.handleResize());
         return false;
       }
     } catch {
@@ -746,13 +795,25 @@ export class GameEngine {
 
   private handleMouseMove = (e: MouseEvent): void => {
     if (this.screen !== 'playing' || !this.pointerLocked) return;
+    if (this.pointerLockWarmupEvents > 0) {
+      this.pointerLockWarmupEvents--;
+      return;
+    }
     const local = this.getLocalActor();
     if (!local || !local.alive) return;
 
+    // Reject anomalous single-frame browser/OS cursor warp-back spikes when locked
+    if (Math.abs(e.movementX) > 220 || Math.abs(e.movementY) > 220) {
+      return;
+    }
+
+    const mx = THREE.MathUtils.clamp(e.movementX, -120, 120);
+    const my = THREE.MathUtils.clamp(e.movementY, -120, 120);
     const sens = this.scopeZoom === 2 ? 0.0007 : this.scopeZoom === 1 ? 0.0012 : 0.0022;
-    local.yaw -= e.movementX * sens;
+    const rawYaw = local.yaw - mx * sens;
+    local.yaw = Math.atan2(Math.sin(rawYaw), Math.cos(rawYaw));
     local.pitch = THREE.MathUtils.clamp(
-      local.pitch - e.movementY * sens,
+      local.pitch - my * sens,
       -Math.PI * 0.48,
       Math.PI * 0.48
     );
@@ -764,7 +825,18 @@ export class GameEngine {
     if (target && target.closest('[data-ui-interactive="true"]')) return;
 
     soundEngine.unlock();
-    if (!this.pointerLocked && target === this.renderer.domElement) {
+
+    if (this.config.mode === 'spectate') {
+      if (e.button === 0) {
+        this.cycleSpectateTarget(1);
+      } else if (e.button === 2) {
+        e.preventDefault();
+        this.cycleSpectateTarget(-1);
+      }
+      return;
+    }
+
+    if (!this.pointerLocked) {
       this.requestPointerLock();
     }
 
@@ -813,6 +885,17 @@ export class GameEngine {
     const code = e.code;
     const isFresh = !this.keys.has(code);
     this.keys.add(code);
+
+    if (this.config.mode === 'spectate') {
+      if (isFresh) {
+        if (code === 'Space' || code === 'ArrowRight') {
+          this.cycleSpectateTarget(1);
+        } else if (code === 'ArrowLeft') {
+          this.cycleSpectateTarget(-1);
+        }
+      }
+      return;
+    }
 
     const local = this.getLocalActor();
     if (!local) return;
@@ -878,6 +961,21 @@ export class GameEngine {
     this.switchSlot(local, slot);
   }
 
+  private triggerEquipAnim(weaponId: WeaponId): void {
+    const spec = WEAPONS[weaponId];
+    this.equipAnimDuration =
+      spec.category === 'sniper'
+        ? 0.42
+        : spec.category === 'rifle'
+          ? 0.34
+          : spec.category === 'smg'
+            ? 0.3
+            : spec.category === 'knife'
+              ? 0.28
+              : 0.24;
+    this.equipAnimTimer = this.equipAnimDuration;
+  }
+
   private switchSlot(actor: ActorState, slot: WeaponSlot): void {
     if (slot === 1 && !actor.primary) return;
     if (slot === 2 && !actor.secondary) return;
@@ -892,6 +990,11 @@ export class GameEngine {
     this.camera.updateProjectionMatrix();
     this.reloadTimer = 0;
     this.inspectTimer = 0;
+    this.awpBoltTimer = 0;
+    this.awpShellEjected = false;
+    if (actor.isLocal) {
+      this.triggerEquipAnim(this.getActiveWeaponId(actor));
+    }
     soundEngine.playUiTick(740);
     this.emitHud(true);
   }
@@ -920,8 +1023,12 @@ export class GameEngine {
     this.actors = [];
     this.botBrains.clear();
 
+    this.lastRoundStartVoiceRound = 0;
+    this.controllingBotId = null;
+
     if (cfg.mode === 'bots') {
       this.isHostAuthority = true;
+      this.defaultLocalActorId = 'local';
       this.localActorId = 'local';
       const enemyTeam: Team = cfg.playerTeam === 'attackers' ? 'defenders' : 'attackers';
       this.actors.push(this.createFreshActor('local', cfg.playerName || 'You', cfg.playerTeam, false, true));
@@ -935,9 +1042,24 @@ export class GameEngine {
         this.actors.push(this.createFreshActor(id, `Bot-${i + 1}`, enemyTeam, true, false));
         this.botBrains.set(id, createBotBrain(id, i));
       }
+    } else if (cfg.mode === 'spectate') {
+      this.isHostAuthority = true;
+      this.defaultLocalActorId = 'spectator';
+      this.localActorId = 'spectator';
+      for (let i = 0; i < 5; i++) {
+        const id = `bot_atk_${i}`;
+        this.actors.push(this.createFreshActor(id, `ATK-${i + 1}`, 'attackers', true, false));
+        this.botBrains.set(id, createBotBrain(id, i));
+      }
+      for (let i = 0; i < 5; i++) {
+        const id = `bot_def_${i}`;
+        this.actors.push(this.createFreshActor(id, `DEF-${i + 1}`, 'defenders', true, false));
+        this.botBrains.set(id, createBotBrain(id, i));
+      }
     } else {
       const room = cfg.room;
       const myId = cfg.localClientId || networkClient.clientId || 'local';
+      this.defaultLocalActorId = myId;
       this.localActorId = myId;
       this.isHostAuthority = !room || room.hostId === myId;
 
@@ -1024,7 +1146,12 @@ export class GameEngine {
   }
 
   private setupRound(): void {
+    this.restoreDefaultPlayerControl();
     this.clearRoundEntities();
+    this.killFeed = [];
+    this.hitmarker = 'none';
+    this.hitmarkerTimer = 0;
+    this.damageFlash = 0;
     this.phase = 'buy';
     this.phaseTimeRemaining = ROUND_CONSTANTS.BUY_PHASE_SECONDS;
     this.roundBanner = `ROUND ${this.roundNumber} · BUY PHASE`;
@@ -1033,8 +1160,12 @@ export class GameEngine {
     this.camera.fov = 78;
     this.camera.updateProjectionMatrix();
     this.reloadTimer = 0;
+    this.awpBoltTimer = 0;
+    this.awpShellEjected = false;
     this.recoilBloom = 0;
     this.flinchPitch = 0;
+    this.killConfirm = null;
+    this.killConfirmTimer = 0;
     this.spectateTargetId = null;
 
     if (isHalftimeRound(this.roundNumber, this.config.maxRounds)) {
@@ -1144,18 +1275,28 @@ export class GameEngine {
       }
     }
 
-    this.syncCameraToLocal();
+    if (this.config.mode === 'spectate') {
+      const initialSpec = this.getSpectateTarget();
+      this.syncSpectatorCamera(initialSpec, 0, performance.now());
+      this.syncActorMeshes(initialSpec, performance.now());
+    } else {
+      this.syncCameraToLocal();
+      const localAfterSpawn = this.getLocalActor();
+      if (localAfterSpawn) {
+        this.triggerEquipAnim(this.getActiveWeaponId(localAfterSpawn));
+      }
+      this.syncActorMeshes(null, performance.now());
+    }
     if (this.roundNumber === 1) {
       soundEngine.preloadVoicelines();
     }
-    soundEngine.playVoiceline('round_start');
     this.emitHud(true);
   }
 
   private rebuildActorMeshes(): void {
     this.clearActorMeshes();
     for (const actor of this.actors) {
-      if (!actor.isLocal) {
+      if (!actor.isLocal && actor.id !== this.defaultLocalActorId) {
         const handle = createOperatorModel(actor.id, actor.team);
         this.scene.add(handle.root);
         this.actorMeshes.set(actor.id, handle);
@@ -1179,6 +1320,36 @@ export class GameEngine {
     this.activeFires = [];
     for (const d of this.droppedWeapons) this.scene.remove(d.mesh);
     this.droppedWeapons = [];
+
+    if (this.decalMesh) {
+      this._mat4A.makeScale(0, 0, 0);
+      for (let i = 0; i < this.maxDecals; i++) {
+        this.decalMesh.setMatrixAt(i, this._mat4A);
+      }
+      this.decalMesh.instanceMatrix.needsUpdate = true;
+      this.decalIndex = 0;
+    }
+
+    if (this.tracerMesh) {
+      this._mat4A.makeScale(0, 0, 0);
+      for (let i = 0; i < this.tracerSlots.length; i++) {
+        this.tracerSlots[i].active = false;
+        this.tracerSlots[i].life = 0;
+        this.tracerSlots[i].matrix.copy(this._mat4A);
+        this.tracerMesh.setMatrixAt(i, this._mat4A);
+      }
+      this.tracerMesh.instanceMatrix.needsUpdate = true;
+    }
+
+    if (this.shellMesh) {
+      this._mat4A.makeScale(0, 0, 0);
+      for (let i = 0; i < this.shellParticles.length; i++) {
+        this.shellParticles[i].active = false;
+        this.shellParticles[i].life = 0;
+        this.shellMesh.setMatrixAt(i, this._mat4A);
+      }
+      this.shellMesh.instanceMatrix.needsUpdate = true;
+    }
   }
 
   public setScreen(screen: AppScreen): void {
@@ -1389,15 +1560,6 @@ export class GameEngine {
     const spec = WEAPONS[inst.id];
     inst.mag = Math.max(0, inst.mag - 1);
     const interval = 60 / Math.max(30, spec.fireRateRpm);
-    if (actor.isLocal) {
-      this.fireCooldown = interval;
-      this.recoilOffsetZ = 0.085;
-      this.recoilKickPitch += spec.recoilKick;
-      this.recoilBloom = Math.min(0.065, this.recoilBloom + spec.recoilSpread);
-      this.muzzleLight.intensity = inst.silenced ? 1.0 : 4.2;
-      this.muzzleLightTimer = 0.04;
-      this.spawnShellCasing(actor);
-    }
 
     const eyeY = actor.y + (actor.crouching ? 1.08 : 1.62);
     const horizSpeed = Math.hypot(actor.vx, actor.vz);
@@ -1410,27 +1572,65 @@ export class GameEngine {
       scopeZoom: actor.isLocal ? this.scopeZoom : 0,
     });
 
+    // Compute exact ray BEFORE applying this shot's recoil kick and bloom so first shots & AWP shots hit dead-on crosshair
     const pitch =
       actor.pitch +
-      (actor.isLocal ? this.recoilKickPitch * 0.45 + this.flinchPitch * 0.65 : 0);
+      (actor.isLocal
+        ? spec.category === 'sniper'
+          ? this.recoilKickPitch + this.flinchPitch
+          : this.recoilKickPitch * 0.45 + this.flinchPitch * 0.65
+        : 0);
     const cosP = Math.cos(pitch);
-    let dx = -Math.sin(actor.yaw) * cosP;
-    let dy = Math.sin(pitch);
-    let dz = -Math.cos(actor.yaw) * cosP;
+    const fx = -Math.sin(actor.yaw) * cosP;
+    const fy = Math.sin(pitch);
+    const fz = -Math.cos(actor.yaw) * cosP;
 
-    dx += (Math.random() - 0.5) * spread * 2;
-    dy += (Math.random() - 0.5) * spread * 2;
-    dz += (Math.random() - 0.5) * spread * 2;
-    const len = Math.hypot(dx, dy, dz) || 1;
-    dx /= len;
-    dy /= len;
-    dz /= len;
+    let dx = fx;
+    let dy = fy;
+    let dz = fz;
+
+    if (spread > 0) {
+      // Sample uniformly within circular cone of angular radius `spread` perpendicular to aim ray
+      const rx = Math.cos(actor.yaw);
+      const rz = -Math.sin(actor.yaw);
+      const ux = -rz * fy;
+      const uy = rz * fx - rx * fz;
+      const uz = rx * fy;
+      const angle = Math.random() * Math.PI * 2;
+      const radius = Math.sqrt(Math.random()) * Math.tan(spread);
+      const offR = Math.cos(angle) * radius;
+      const offU = Math.sin(angle) * radius;
+
+      dx = fx + rx * offR + ux * offU;
+      dy = fy + uy * offU;
+      dz = fz + rz * offR + uz * offU;
+      const len = Math.hypot(dx, dy, dz) || 1;
+      dx /= len;
+      dy /= len;
+      dz /= len;
+    }
+
+    if (actor.isLocal) {
+      this.fireCooldown = interval;
+      this.recoilOffsetZ = inst.id === 'awp' ? 0.13 : 0.085;
+      this.recoilKickPitch += spec.recoilKick;
+      this.recoilBloom =
+        inst.id === 'awp' ? 0 : Math.min(0.065, this.recoilBloom + spec.recoilSpread);
+      this.muzzleLight.intensity = inst.silenced ? 1.0 : 4.2;
+      this.muzzleLightTimer = 0.04;
+      if (inst.id === 'awp') {
+        this.awpBoltTimer = this.awpBoltDuration;
+        this.awpShellEjected = false;
+      } else {
+        this.spawnShellCasing(actor);
+      }
+    }
 
     const local = this.getLocalActor();
     const distToLocal = local ? Math.hypot(actor.x - local.x, actor.z - local.z) : 0;
     soundEngine.playGunshot(inst.id, Boolean(inst.silenced), actor.isLocal ? 0 : distToLocal);
 
-    if (actor.isLocal && this.config.mode !== 'bots') {
+    if (actor.isLocal && (this.config.mode === 'pvp' || this.config.mode === 'mixed')) {
       networkClient.send({
         type: 'shoot',
         payload: {
@@ -1495,10 +1695,7 @@ export class GameEngine {
     const hitboxMeshes: THREE.Mesh[] = [];
     for (const a of this.actors) {
       if (!a.alive || a.id === shooter.id || a.team === shooter.team) continue;
-      const handle = this.actorMeshes.get(a.id);
-      if (handle) {
-        hitboxMeshes.push(...handle.hitboxes);
-      } else if (a.isLocal) {
+      if (a.isLocal) {
         const hitZone = this.raycastLocalPlayerSphere(ox, oy, oz, dx, dy, dz, a, wallDist);
         if (hitZone) {
           const dist = Math.hypot(a.x - ox, a.z - oz);
@@ -1522,6 +1719,11 @@ export class GameEngine {
           );
           this.spawnTracer(ox, oy - 0.08, oz, a.x, a.y + 1.35, a.z);
           return;
+        }
+      } else {
+        const handle = this.actorMeshes.get(a.id);
+        if (handle) {
+          hitboxMeshes.push(...handle.hitboxes);
         }
       }
     }
@@ -1555,7 +1757,7 @@ export class GameEngine {
             if (ud.zone === 'head') soundEngine.playHeadshotDink(0);
           }
 
-          if (this.config.mode !== 'bots' && !target.isBot && shooter.isLocal) {
+          if ((this.config.mode === 'pvp' || this.config.mode === 'mixed') && !target.isBot && shooter.isLocal) {
             networkClient.send({
               type: 'hit_claim',
               payload: {
@@ -1687,6 +1889,9 @@ export class GameEngine {
         this.camera.fov = 78;
         this.camera.updateProjectionMatrix();
         this.reloadTimer = 0;
+        this.awpBoltTimer = 0;
+        this.awpShellEjected = false;
+        this.equipAnimTimer = 0;
         this.burstQueue = 0;
         this.mouseDownLeft = false;
         this.inspectTimer = 0;
@@ -1698,7 +1903,29 @@ export class GameEngine {
       if (attacker && attacker.id !== victim.id) {
         attacker.kills += 1;
         if (headshot) attacker.headshots += 1;
-        attacker.cash = clampCash(attacker.cash + getKillReward(weaponId));
+        const reward = getKillReward(weaponId);
+        if (attacker.id === this.controllingBotId) {
+          const defaultActor = this.getDefaultLocalActor();
+          if (defaultActor) {
+            defaultActor.cash = clampCash(defaultActor.cash + reward);
+          } else {
+            attacker.cash = clampCash(attacker.cash + reward);
+          }
+        } else {
+          attacker.cash = clampCash(attacker.cash + reward);
+        }
+
+        if (attacker.isLocal) {
+          this.killConfirm = {
+            id: this.nextKillId,
+            victimName: victim.name,
+            weaponName: WEAPONS[weaponId]?.name ?? weaponId,
+            headshot,
+            reward,
+          };
+          this.killConfirmTimer = 1.65;
+          soundEngine.playKillConfirm(headshot);
+        }
       }
 
       if (victim.hasC4) {
@@ -1725,6 +1952,10 @@ export class GameEngine {
         timestamp: performance.now(),
       });
       if (this.killFeed.length > 6) this.killFeed.pop();
+
+      if (victim.id === this.controllingBotId) {
+        this.restoreDefaultPlayerControl();
+      }
 
       this.checkRoundEndConditions();
     }
@@ -1769,7 +2000,7 @@ export class GameEngine {
       mesh,
     });
 
-    if (actor.isLocal && this.config.mode !== 'bots') {
+    if (actor.isLocal && (this.config.mode === 'pvp' || this.config.mode === 'mixed')) {
       networkClient.send({
         type: 'grenade_event',
         payload: {
@@ -2071,6 +2302,8 @@ export class GameEngine {
     const local = this.getLocalActor();
     if (local) {
       soundEngine.playRoundCue(local.team === winner);
+    } else if (this.config.mode === 'spectate') {
+      soundEngine.playRoundCue(winner === this.config.playerTeam);
     }
 
     const matchWinner = checkMatchWinner(
@@ -2262,8 +2495,8 @@ export class GameEngine {
         this.phase = (payload.phase as RoundPhase) ?? this.phase;
         this.phaseTimeRemaining = Number(payload.phaseTimeRemaining ?? this.phaseTimeRemaining);
 
-        if (this.roundNumber !== prevRound && this.phase === 'buy') {
-          soundEngine.playVoiceline('round_start');
+        if (prevPhase === 'buy' && this.phase === 'live') {
+          this.triggerRoundStartVoiceline();
         } else if (
           prevPhase !== 'round_end' &&
           prevPhase !== 'match_end' &&
@@ -2301,7 +2534,7 @@ export class GameEngine {
   }
 
   private broadcastRoundSync(): void {
-    if (this.config.mode === 'bots' || !this.isHostAuthority) return;
+    if ((this.config.mode !== 'pvp' && this.config.mode !== 'mixed') || !this.isHostAuthority) return;
     networkClient.send({
       type: 'round_sync',
       payload: {
@@ -2389,6 +2622,7 @@ export class GameEngine {
         this.roundBanner = 'ROUND LIVE · SECURE THE OBJECTIVE';
         this.roundBannerTimer = 2.5;
         soundEngine.playUiTick(1100);
+        this.triggerRoundStartVoiceline();
         this.emitHud(true);
       }
     } else if (this.phase === 'live') {
@@ -2516,35 +2750,18 @@ export class GameEngine {
       actor.hasC4 = interp.target.hasC4;
     }
 
-    const activeSpec = local && !local.alive ? this.getSpectateTarget(local) : null;
+    const activeSpec =
+      this.config.mode === 'spectate'
+        ? this.getSpectateTarget()
+        : local && !local.alive
+          ? this.getSpectateTarget(local)
+          : null;
 
-    for (const actor of this.actors) {
-      if (actor.isLocal) continue;
-      const handle = this.actorMeshes.get(actor.id);
-      if (!handle) continue;
-      handle.root.visible = actor.alive && actor.id !== activeSpec?.id;
-      if (!actor.alive) continue;
-      handle.root.position.set(actor.x, actor.y, actor.z);
-      handle.root.rotation.y = actor.yaw;
-      handle.headGroup.rotation.x = actor.pitch * 0.65;
-      handle.bodyGroup.scale.y = actor.crouching ? 0.72 : 1.0;
-      handle.c4BackMesh.visible = actor.hasC4;
-      handle.helmetMesh.visible = actor.hasHelmet;
-
-      const speed = Math.hypot(actor.vx, actor.vz);
-      if (speed > 0.3) {
-        const stride = Math.sin(nowMs * 0.012) * 0.45;
-        handle.leftLeg.rotation.x = stride;
-        handle.rightLeg.rotation.x = -stride;
-      } else {
-        handle.leftLeg.rotation.x = 0;
-        handle.rightLeg.rotation.x = 0;
-      }
-    }
-
-    if (local && !local.alive) {
+    if (this.config.mode === 'spectate' || (local && !local.alive)) {
       this.syncSpectatorCamera(activeSpec, dt, nowMs);
     }
+
+    this.syncActorMeshes(activeSpec, nowMs);
 
     this.stepGrenades(dt);
     this.stepTracersAndShells(dt);
@@ -2554,7 +2771,7 @@ export class GameEngine {
       if (this.muzzleLightTimer <= 0) this.muzzleLight.intensity = 0;
     }
 
-    if (this.config.mode !== 'bots' && local) {
+    if ((this.config.mode === 'pvp' || this.config.mode === 'mixed') && local) {
       this.netSyncAccum += dt;
       if (this.netSyncAccum >= 0.05) {
         this.netSyncAccum = 0;
@@ -2599,6 +2816,10 @@ export class GameEngine {
     if (this.hitmarkerTimer > 0) {
       this.hitmarkerTimer -= dt;
       if (this.hitmarkerTimer <= 0) this.hitmarker = 'none';
+    }
+    if (this.killConfirmTimer > 0) {
+      this.killConfirmTimer -= dt;
+      if (this.killConfirmTimer <= 0) this.killConfirm = null;
     }
 
     this.fireCooldown = Math.max(0, this.fireCooldown - dt);
@@ -2680,6 +2901,10 @@ export class GameEngine {
     const accel = this.grounded ? 14 : 4;
     local.vx = THREE.MathUtils.lerp(local.vx, dirX * maxSpeed, 1 - Math.exp(-accel * dt));
     local.vz = THREE.MathUtils.lerp(local.vz, dirZ * maxSpeed, 1 - Math.exp(-accel * dt));
+    if (wishFwd === 0 && wishStrafe === 0 && Math.hypot(local.vx, local.vz) < 0.25) {
+      local.vx = 0;
+      local.vz = 0;
+    }
 
     if (this.keys.has('Space') && this.grounded && this.phase !== 'buy') {
       local.vy = 6.6;
@@ -2731,8 +2956,22 @@ export class GameEngine {
       soundEngine.playUiTick(840);
     }
 
+    const horizSpeed = Math.hypot(local.vx, local.vz);
+    const canPlantStationary = canPlantBombNow({
+      isGrounded: this.grounded,
+      wishFwd,
+      wishStrafe,
+      horizontalSpeed: horizSpeed,
+    });
+
     const holdingE = this.keys.has('KeyE');
-    if (holdingE && this.phase === 'live' && local.team === 'attackers' && local.hasC4) {
+    if (
+      holdingE &&
+      this.phase === 'live' &&
+      local.team === 'attackers' &&
+      local.hasC4 &&
+      canPlantStationary
+    ) {
       const site = getPlantSiteAt(local.x, local.z);
       if (site) {
         this.bomb.status = 'planting';
@@ -2741,6 +2980,9 @@ export class GameEngine {
         if (this.bomb.plantProgress >= 1) {
           this.completeBombPlant(local, site);
         }
+      } else if (this.bomb.status === 'planting') {
+        this.bomb.status = 'carried';
+        this.bomb.plantProgress = 0;
       }
     } else if (this.bomb.status === 'planting') {
       this.bomb.status = 'carried';
@@ -2765,7 +3007,6 @@ export class GameEngine {
       this.bomb.defuserId = null;
     }
 
-    const horizSpeed = Math.hypot(local.vx, local.vz);
     if (this.grounded && horizSpeed > 1.2) {
       this.walkBobPhase += horizSpeed * dt * 2.2;
       if (!walking && !local.crouching) {
@@ -2774,6 +3015,16 @@ export class GameEngine {
           this.footstepAccum = 0;
           soundEngine.playFootstep();
         }
+      }
+    }
+
+    if (this.awpBoltTimer > 0) {
+      this.awpBoltTimer = Math.max(0, this.awpBoltTimer - dt);
+      const boltProgress = 1 - this.awpBoltTimer / this.awpBoltDuration;
+      if (!this.awpShellEjected && boltProgress >= 0.28) {
+        this.awpShellEjected = true;
+        this.spawnShellCasing(local);
+        soundEngine.playBoltAction();
       }
     }
 
@@ -2802,7 +3053,7 @@ export class GameEngine {
     soundEngine.playBombBeep(true);
     soundEngine.playVoiceline('bomb_planted');
 
-    if (this.config.mode !== 'bots') {
+    if (this.config.mode === 'pvp' || this.config.mode === 'mixed') {
       networkClient.send({
         type: 'bomb_event',
         payload: { action: 'planted', site, x: this.bomb.x, y: this.bomb.y, z: this.bomb.z },
@@ -2816,15 +3067,32 @@ export class GameEngine {
     this.bomb.defuseProgress = 0;
     this.worldBombGroup.visible = false;
     soundEngine.playVoiceline('bomb_defused');
-    if (this.config.mode !== 'bots') {
+    if (this.config.mode === 'pvp' || this.config.mode === 'mixed') {
       networkClient.send({ type: 'bomb_event', payload: { action: 'defused' } });
     }
     this.concludeRound('defenders', 'C4 DEFUSED', true);
   }
 
-  private getSpectateTarget(local: ActorState): ActorState | null {
-    const aliveAllies = this.actors.filter((a) => a.alive && a.team === local.team && !a.isLocal);
-    const pool = aliveAllies.length > 0 ? aliveAllies : this.actors.filter((a) => a.alive && !a.isLocal);
+  private getSpectatePool(local?: ActorState): ActorState[] {
+    if (!local || this.config.mode === 'spectate') {
+      const preferred = this.actors.filter(
+        (a) => a.alive && a.team === this.config.playerTeam
+      );
+      const others = this.actors.filter(
+        (a) => a.alive && a.team !== this.config.playerTeam
+      );
+      return [...preferred, ...others];
+    }
+    const aliveAllies = this.actors.filter(
+      (a) => a.alive && a.team === local.team && !a.isLocal
+    );
+    return aliveAllies.length > 0
+      ? aliveAllies
+      : this.actors.filter((a) => a.alive && !a.isLocal);
+  }
+
+  private getSpectateTarget(local?: ActorState): ActorState | null {
+    const pool = this.getSpectatePool(local);
     if (pool.length === 0) {
       this.spectateTargetId = null;
       return null;
@@ -2837,67 +3105,107 @@ export class GameEngine {
 
   private cycleSpectateTarget(dir: 1 | -1): void {
     const local = this.getLocalActor();
-    if (!local || local.alive) return;
-    const aliveAllies = this.actors.filter((a) => a.alive && a.team === local.team && !a.isLocal);
-    const pool = aliveAllies.length > 0 ? aliveAllies : this.actors.filter((a) => a.alive && !a.isLocal);
+    if (this.config.mode !== 'spectate' && (!local || local.alive)) return;
+    const pool = this.getSpectatePool(local);
     if (pool.length <= 1) return;
     const idx = Math.max(0, pool.findIndex((a) => a.id === this.spectateTargetId));
     const nextIdx = (idx + dir + pool.length) % pool.length;
-    this.spectateTargetId = pool[nextIdx].id;
+    const nextTarget = pool[nextIdx];
+    this.spectateTargetId = nextTarget.id;
+    const nowMs = performance.now();
+    this.syncSpectatorCamera(nextTarget, 0, nowMs);
+    this.syncActorMeshes(nextTarget, nowMs);
     soundEngine.playUiTick(660);
     this.emitHud(true);
   }
 
+  private triggerRoundStartVoiceline(): void {
+    if (this.lastRoundStartVoiceRound === this.roundNumber) return;
+    this.lastRoundStartVoiceRound = this.roundNumber;
+    soundEngine.playVoiceline('round_start');
+  }
+
+  private getDefaultLocalActor(): ActorState | undefined {
+    if (this.config.mode === 'spectate') return undefined;
+    return this.actors.find((a) => a.id === this.defaultLocalActorId) ?? this.actors[0];
+  }
+
+  private restoreDefaultPlayerControl(): void {
+    if (this.controllingBotId) {
+      const botActor = this.actors.find((a) => a.id === this.controllingBotId);
+      if (botActor) {
+        botActor.isBot = true;
+        botActor.isLocal = false;
+      }
+      this.controllingBotId = null;
+    }
+    this.localActorId = this.defaultLocalActorId;
+    const defaultActor = this.getDefaultLocalActor();
+    if (defaultActor) {
+      defaultActor.isLocal = true;
+    }
+  }
+
   private takeOverSpectatedBot(): void {
     const local = this.getLocalActor();
-    if (!local || local.alive) return;
+    if (!local || local.alive || this.controllingBotId) return;
     const target = this.getSpectateTarget(local);
     if (!target || !target.isBot || !target.alive || target.team !== local.team) return;
 
-    local.x = target.x;
-    local.y = target.y;
-    local.z = target.z;
-    local.vx = target.vx;
-    local.vy = target.vy;
-    local.vz = target.vz;
-    local.yaw = target.yaw;
-    local.pitch = target.pitch;
-    local.crouching = target.crouching;
-    local.hp = target.hp;
-    local.armor = target.armor;
-    local.hasHelmet = target.hasHelmet;
-    local.activeSlot = target.activeSlot;
-    local.primary = target.primary ? { ...target.primary } : null;
-    local.secondary = target.secondary ? { ...target.secondary } : null;
-    local.knife = target.knife;
-    local.grenades = [...target.grenades];
-    local.hasC4 = target.hasC4;
-    local.blindTimer = target.blindTimer;
-    local.inBuyZone = isInBuyZone(local.team, local.x, local.z);
-    local.alive = true;
-
-    if (this.bomb.carrierId === target.id) {
-      this.bomb.carrierId = local.id;
-    }
-    if (this.bomb.defuserId === target.id) {
-      this.bomb.defuserId = local.id;
-    }
-
-    target.alive = false;
-    target.hasC4 = false;
-    target.primary = null;
-    target.grenades = [];
+    local.isLocal = false;
+    target.isBot = false;
+    target.isLocal = true;
+    this.localActorId = target.id;
+    this.controllingBotId = target.id;
     this.spectateTargetId = null;
-    this.previousSlot = local.activeSlot === 1 && local.secondary ? 2 : 3;
+    this.previousSlot = target.activeSlot === 1 && target.secondary ? 2 : 3;
     this.flinchPitch = 0;
     this.recoilKickPitch = 0;
+    this.awpBoltTimer = 0;
+    this.awpShellEjected = false;
     this.scopeZoom = 0;
     this.camera.fov = 78;
     this.camera.updateProjectionMatrix();
+    this.triggerEquipAnim(this.getActiveWeaponId(target));
 
     this.syncCameraToLocal();
+    this.syncActorMeshes(null, performance.now());
     soundEngine.playUiTick(880);
     this.emitHud(true);
+  }
+
+  private syncActorMeshes(activeSpec: ActorState | null, nowMs: number): void {
+    for (const actor of this.actors) {
+      const handle = this.actorMeshes.get(actor.id);
+      if (!handle) continue;
+      const isViewer =
+        actor.isLocal ||
+        actor.id === this.localActorId ||
+        actor.id === activeSpec?.id;
+      const closeToCam =
+        Math.hypot(actor.x - this.camera.position.x, actor.z - this.camera.position.z) < 0.95 &&
+        Math.abs(actor.y + 1.35 - this.camera.position.y) < 1.35;
+      const visible = actor.alive && !isViewer && !closeToCam;
+      handle.root.visible = visible;
+      handle.headGroup.visible = visible;
+      handle.helmetMesh.visible = visible && actor.hasHelmet;
+      if (!actor.alive || isViewer) continue;
+      handle.root.position.set(actor.x, actor.y, actor.z);
+      handle.root.rotation.y = actor.yaw;
+      handle.headGroup.rotation.x = actor.pitch * 0.65;
+      handle.bodyGroup.scale.y = actor.crouching ? 0.72 : 1.0;
+      handle.c4BackMesh.visible = actor.hasC4;
+
+      const speed = Math.hypot(actor.vx, actor.vz);
+      if (speed > 0.3) {
+        const stride = Math.sin(nowMs * 0.012) * 0.45;
+        handle.leftLeg.rotation.x = stride;
+        handle.rightLeg.rotation.x = -stride;
+      } else {
+        handle.leftLeg.rotation.x = 0;
+        handle.rightLeg.rotation.x = 0;
+      }
+    }
   }
 
   private syncSpectatorCamera(
@@ -2955,6 +3263,7 @@ export class GameEngine {
       this.currentViewmodel = buildWeaponViewmodel(activeId);
       this.currentViewmodelWeaponId = activeId;
       this.viewmodelRig.add(this.currentViewmodel.root);
+      this.triggerEquipAnim(activeId);
     }
 
     this.viewmodelRig.visible = this.scopeZoom === 0;
@@ -2970,11 +3279,38 @@ export class GameEngine {
     const bobY = Math.abs(Math.sin(this.walkBobPhase)) * Math.min(0.016, horizSpeed * 0.0022);
     const reloadDip = this.reloadTimer > 0 ? Math.sin(this.reloadTimer * 4) * 0.08 - 0.12 : 0;
 
+    let equipDropY = 0;
+    let equipOffsetZ = 0;
+    let equipPitch = 0;
+    let equipRoll = 0;
+    if (this.equipAnimTimer > 0) {
+      this.equipAnimTimer = Math.max(0, this.equipAnimTimer - dt);
+      const t = 1 - this.equipAnimTimer / Math.max(0.05, this.equipAnimDuration);
+      const ease = 1 - Math.pow(1 - t, 3);
+      const inv = 1 - ease;
+      equipDropY = -inv * 0.17 + Math.sin(t * Math.PI) * 0.012;
+      equipOffsetZ = inv * 0.14;
+      equipPitch = -inv * 0.56;
+      equipRoll = inv * 0.34;
+    }
+
     vm.root.position.set(
       0.21 + bobX - wishStrafe * 0.012,
-      -0.19 - bobY + reloadDip,
-      -0.41 + this.recoilOffsetZ
+      -0.19 - bobY + reloadDip + equipDropY,
+      -0.41 + this.recoilOffsetZ + equipOffsetZ
     );
+
+    // Reset articulated parts before applying active animation
+    if (vm.karambitPivot) vm.karambitPivot.rotation.x = 0;
+    if (vm.butterflyLeftHandle && vm.butterflyRightHandle && vm.butterflyBlade) {
+      vm.butterflyLeftHandle.rotation.z = 0;
+      vm.butterflyRightHandle.rotation.z = 0;
+      vm.butterflyBlade.rotation.x = 0;
+    }
+    if (vm.awpBoltPivot) {
+      vm.awpBoltPivot.rotation.set(0, 0, 0);
+      vm.awpBoltPivot.position.set(0.024, 0.036, 0.02);
+    }
 
     if (this.inspectTimer > 0) {
       this.inspectTimer = Math.max(0, this.inspectTimer - dt);
@@ -2984,6 +3320,7 @@ export class GameEngine {
         Math.sin(p * Math.PI * 2) * 0.7,
         Math.sin(p * Math.PI) * 0.4
       );
+      vm.weaponPivot.position.set(0, 0, 0);
       if (vm.karambitPivot) {
         vm.karambitPivot.rotation.x = p * Math.PI * 4;
       }
@@ -2998,15 +3335,58 @@ export class GameEngine {
       const s = Math.sin((this.meleeAnimTimer / 0.26) * Math.PI);
       vm.weaponPivot.rotation.set(-s * 0.9, s * 0.4, 0);
       vm.weaponPivot.position.set(0, 0, -s * 0.16);
+    } else if (this.awpBoltTimer > 0 && activeId === 'awp') {
+      const p = 1 - this.awpBoltTimer / this.awpBoltDuration;
+      // 4-phase bolt action: cant rifle -> lift bolt -> pull back & eject -> push forward & lock
+      const cantWeight =
+        p < 0.16 ? p / 0.16 : p > 0.86 ? (1 - p) / 0.14 : 1;
+      const lift =
+        p < 0.12
+          ? 0
+          : p < 0.24
+            ? (p - 0.12) / 0.12
+            : p < 0.78
+              ? 1
+              : p < 0.9
+                ? 1 - (p - 0.78) / 0.12
+                : 0;
+      const pull =
+        p < 0.24
+          ? 0
+          : p < 0.48
+            ? (p - 0.24) / 0.24
+            : p < 0.56
+              ? 1
+              : p < 0.78
+                ? 1 - (p - 0.56) / 0.22
+                : 0;
+
+      vm.weaponPivot.rotation.set(
+        0.09 * cantWeight,
+        0.16 * cantWeight,
+        0.26 * cantWeight - wishStrafe * 0.04
+      );
+      vm.weaponPivot.position.set(0, -0.015 * pull, 0.03 * pull);
+      if (vm.awpBoltPivot) {
+        vm.awpBoltPivot.rotation.z = lift * 0.92;
+        vm.awpBoltPivot.position.z = 0.02 + pull * 0.095;
+      }
+    } else if (this.equipAnimTimer > 0) {
+      const t = 1 - this.equipAnimTimer / Math.max(0.05, this.equipAnimDuration);
+      vm.weaponPivot.rotation.set(equipPitch, 0, equipRoll - wishStrafe * 0.04);
+      vm.weaponPivot.position.set(0, 0, 0);
+      if (vm.karambitPivot) {
+        vm.karambitPivot.rotation.x = (1 - t) * Math.PI * 2;
+      }
+      if (vm.butterflyLeftHandle && vm.butterflyRightHandle && vm.butterflyBlade) {
+        const flip = Math.sin(t * Math.PI);
+        vm.butterflyLeftHandle.rotation.z = flip * 1.8;
+        vm.butterflyRightHandle.rotation.z = -flip * 1.8;
+        vm.butterflyBlade.rotation.x = flip * 0.75;
+      }
     } else {
       vm.weaponPivot.rotation.set(0, 0, -wishStrafe * 0.04);
       vm.weaponPivot.position.set(0, 0, 0);
-      if (vm.karambitPivot) vm.karambitPivot.rotation.x = 0;
-      if (vm.butterflyLeftHandle && vm.butterflyRightHandle && vm.butterflyBlade) {
-        vm.butterflyLeftHandle.rotation.z = 0;
-        vm.butterflyRightHandle.rotation.z = 0;
-        vm.butterflyBlade.rotation.x = 0;
-      }
     }
   }
 
@@ -3058,12 +3438,14 @@ export class GameEngine {
   }
 
   private getLocalActor(): ActorState | undefined {
+    if (this.config.mode === 'spectate') return undefined;
     return this.actors.find((a) => a.id === this.localActorId) ?? this.actors[0];
   }
 
   private emitHud(_immediate: boolean): void {
     const local = this.getLocalActor();
-    if (!local) {
+    const isSpectateMode = this.config.mode === 'spectate';
+    if (this.actors.length === 0 || (!isSpectateMode && !local)) {
       this.onHudUpdate({
         screen: this.screen,
         mode: this.config.mode,
@@ -3081,6 +3463,7 @@ export class GameEngine {
         spectatingName: null,
         spectatingTeam: null,
         spectatingCanControl: false,
+        controllingBotName: null,
         hp: 100,
         armor: 0,
         hasHelmet: false,
@@ -3102,10 +3485,11 @@ export class GameEngine {
         grenades: [],
         hasC4: false,
         bomb: this.bomb,
-        crosshairSpread: 6,
+        crosshairSpread: 2,
         blindAlpha: 0,
         damageFlash: 0,
         hitmarker: 'none',
+        killConfirm: null,
         interactPrompt: null,
         killFeed: [],
         radarBlips: [],
@@ -3121,8 +3505,16 @@ export class GameEngine {
       return;
     }
 
-    const specTarget = !local.alive ? this.getSpectateTarget(local) : null;
-    const displayActor = specTarget ?? local;
+    const specTarget = isSpectateMode
+      ? this.getSpectateTarget()
+      : local && !local.alive
+        ? this.getSpectateTarget(local)
+        : null;
+    const defaultActor = isSpectateMode
+      ? (specTarget ?? this.actors[0])
+      : (this.getDefaultLocalActor() ?? local!);
+    const displayActor = specTarget ?? local ?? this.actors[0];
+    const localAliveNow = Boolean(!isSpectateMode && local?.alive);
 
     const activeId = this.getActiveWeaponId(displayActor);
     const activeInst =
@@ -3137,19 +3529,22 @@ export class GameEngine {
       horizontalSpeed: horizSpeed,
       isCrouching: displayActor.crouching,
       isAirborne: displayActor.y > 0.08,
-      recoilBloom: local.alive ? this.recoilBloom : 0,
-      scopeZoom: local.alive ? this.scopeZoom : 0,
+      recoilBloom: localAliveNow ? this.recoilBloom : 0,
+      scopeZoom: localAliveNow ? this.scopeZoom : 0,
     });
 
     let interactPrompt: string | null = null;
-    if (local.alive) {
+    if (localAliveNow && local) {
       if (this.phase === 'live' && local.team === 'attackers' && local.hasC4) {
         const site = getPlantSiteAt(local.x, local.z);
         if (site) {
+          const movingNow = !this.grounded || horizSpeed > 0.35;
           interactPrompt =
             this.bomb.status === 'planting'
               ? `Planting C4 at Site ${site}...`
-              : `Hold [E] to Plant C4 at Site ${site}`;
+              : movingNow
+                ? `Stand still and hold [E] to Plant C4 at Site ${site}`
+                : `Hold [E] to Plant C4 at Site ${site}`;
         }
       } else if (
         this.phase === 'planted' &&
@@ -3164,7 +3559,7 @@ export class GameEngine {
     }
 
     const radarBlips = this.actors.map((a) => {
-      const sameTeam = a.team === local.team;
+      const sameTeam = a.team === defaultActor.team;
       const spotted =
         sameTeam ||
         (a.alive &&
@@ -3201,19 +3596,23 @@ export class GameEngine {
       attackerScore: this.attackerScore,
       defenderScore: this.defenderScore,
       roundBanner: this.roundBanner,
-      localTeam: local.team,
-      localAlive: local.alive,
+      localTeam: defaultActor.team,
+      localAlive: localAliveNow,
       spectatingName: specTarget?.name ?? null,
       spectatingTeam: specTarget?.team ?? null,
       spectatingCanControl: Boolean(
-        specTarget && specTarget.isBot && specTarget.team === local.team
+        !isSpectateMode && local && specTarget && specTarget.isBot && specTarget.team === local.team
       ),
+      controllingBotName: !isSpectateMode && this.controllingBotId && local ? local.name : null,
       hp: Math.round(displayActor.hp),
       armor: Math.round(displayActor.armor),
       hasHelmet: displayActor.hasHelmet,
-      cash: local.cash,
+      cash: defaultActor.cash,
       inBuyZone: displayActor.inBuyZone,
-      canBuy: local.alive && local.inBuyZone && this.phase === 'buy',
+      canBuy:
+        !isSpectateMode &&
+        !this.controllingBotId &&
+        Boolean(local?.alive && local.inBuyZone && this.phase === 'buy'),
       activeSlot: displayActor.activeSlot,
       activeWeaponId: activeId,
       activeWeaponName: WEAPONS[activeId].name,
@@ -3221,18 +3620,23 @@ export class GameEngine {
       reserve: activeInst?.reserve ?? 0,
       silenced: Boolean(activeInst?.silenced),
       burstMode: Boolean(activeInst?.burstMode),
-      scopeZoom: local.alive ? this.scopeZoom : 0,
-      isReloading: local.alive && this.reloadTimer > 0,
+      scopeZoom: localAliveNow ? this.scopeZoom : 0,
+      isReloading: localAliveNow && this.reloadTimer > 0,
       primaryId: (displayActor.primary?.id as PrimaryWeaponId) ?? null,
       secondaryId: (displayActor.secondary?.id as SecondaryWeaponId) ?? null,
       knifeId: displayActor.knife,
       grenades: [...displayActor.grenades],
       hasC4: displayActor.hasC4,
       bomb: { ...this.bomb },
-      crosshairSpread: Math.min(44, Math.max(4, spreadRad * 680)),
+      crosshairSpread: (() => {
+        const vh = this.container.clientHeight || window.innerHeight || 720;
+        const focalPx = vh / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) * 0.5));
+        return Math.min(180, Math.max(2, Math.tan(spreadRad) * focalPx));
+      })(),
       blindAlpha: Math.min(1, displayActor.blindTimer / 2.2),
-      damageFlash: local.alive ? this.damageFlash : 0,
-      hitmarker: local.alive ? this.hitmarker : 'none',
+      damageFlash: localAliveNow ? this.damageFlash : 0,
+      hitmarker: localAliveNow ? this.hitmarker : 'none',
+      killConfirm: this.killConfirm,
       interactPrompt,
       killFeed: [...this.killFeed],
       radarBlips,
@@ -3246,7 +3650,7 @@ export class GameEngine {
         name: a.name,
         team: a.team,
         isBot: a.isBot,
-        isLocal: a.isLocal,
+        isLocal: !isSpectateMode && a.id === this.defaultLocalActorId,
         alive: a.alive,
         kills: a.kills,
         deaths: a.deaths,

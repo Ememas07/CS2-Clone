@@ -160,7 +160,7 @@ export function TacticalHUD({
     }
   }, [hud.bomb, hud.localTeam, hud.localX, hud.localYaw, hud.localZ, hud.mapId, hud.radarBlips]);
 
-  const gapPx = Math.max(4, Math.min(34, hud.crosshairSpread));
+  const spreadRadiusPx = Math.max(2, Math.round(hud.crosshairSpread));
   const isGun = hud.activeSlot === 1 || hud.activeSlot === 2;
   const spec = WEAPONS[hud.activeWeaponId];
   const canBuyNow = hud.canBuy && hud.localAlive;
@@ -205,24 +205,33 @@ export function TacticalHUD({
         </div>
       )}
 
-      {/* Dynamic Crosshair (hidden while scoped or dead without target or in buy menu) */}
+      {/* Dynamic Crosshair: exact bullet-cone pixel radius */}
       {hud.scopeZoom === 0 && (hud.localAlive || Boolean(hud.spectatingName)) && !buyMenuOpen && (
         <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
+          {spreadRadiusPx > 5 && (
+            <div
+              className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-emerald-300/25"
+              style={{
+                width: `${spreadRadiusPx * 2}px`,
+                height: `${spreadRadiusPx * 2}px`,
+              }}
+            />
+          )}
           <div
             className="absolute left-1/2 -translate-x-1/2 w-[2px] h-[9px] bg-emerald-300 shadow-[0_0_2px_#000]"
-            style={{ bottom: `${gapPx}px` }}
+            style={{ bottom: `${spreadRadiusPx}px` }}
           />
           <div
             className="absolute left-1/2 -translate-x-1/2 w-[2px] h-[9px] bg-emerald-300 shadow-[0_0_2px_#000]"
-            style={{ top: `${gapPx}px` }}
+            style={{ top: `${spreadRadiusPx}px` }}
           />
           <div
             className="absolute top-1/2 -translate-y-1/2 h-[2px] w-[9px] bg-emerald-300 shadow-[0_0_2px_#000]"
-            style={{ right: `${gapPx}px` }}
+            style={{ right: `${spreadRadiusPx}px` }}
           />
           <div
             className="absolute top-1/2 -translate-y-1/2 h-[2px] w-[9px] bg-emerald-300 shadow-[0_0_2px_#000]"
-            style={{ left: `${gapPx}px` }}
+            style={{ left: `${spreadRadiusPx}px` }}
           />
           <div className="w-[2px] h-[2px] bg-emerald-300" />
         </div>
@@ -241,6 +250,34 @@ export function TacticalHUD({
             <line x1="4" y1="22" x2="10" y2="16" stroke="currentColor" strokeWidth="2.2" />
             <line x1="22" y1="22" x2="16" y2="16" stroke="currentColor" strokeWidth="2.2" />
           </svg>
+        </div>
+      )}
+
+      {/* Kill Confirmation Feedback */}
+      {hud.killConfirm && (
+        <div
+          key={hud.killConfirm.id}
+          className="fixed left-1/2 bottom-44 -translate-x-1/2 pointer-events-none flex items-center gap-2.5 px-4 py-1.5 rounded bg-[#0b0e14]/92 border shadow-xl animate-pulse"
+          style={{
+            borderColor: hud.killConfirm.headshot ? 'rgba(244,63,94,0.85)' : 'rgba(245,158,11,0.75)',
+          }}
+        >
+          <span
+            className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[11px] font-black ${
+              hud.killConfirm.headshot
+                ? 'bg-rose-500 text-white'
+                : 'bg-amber-400 text-slate-950'
+            }`}
+          >
+            {hud.killConfirm.headshot ? 'HS' : '✕'}
+          </span>
+          <div className="text-xs font-bold uppercase tracking-wider text-white">
+            {hud.killConfirm.headshot ? 'Headshot Elimination' : 'Eliminated'}{' '}
+            <span className="text-amber-300">{hud.killConfirm.victimName}</span>
+          </div>
+          <span className="text-xs font-tactical-mono font-bold text-emerald-400">
+            +${hud.killConfirm.reward}
+          </span>
         </div>
       )}
 
@@ -456,18 +493,39 @@ export function TacticalHUD({
           </div>
         )}
 
+        {hud.localAlive && hud.controllingBotName && (
+          <div className="px-3.5 py-1 bg-[#0b0e14]/90 border border-amber-400/50 rounded text-xs font-bold uppercase tracking-wider text-amber-300">
+            Controlling Bot: {hud.controllingBotName}
+          </div>
+        )}
+
         {!hud.localAlive && (
-          <div className="px-4 py-2 bg-[#0b0e14]/92 border border-rose-500/40 rounded text-center">
-            <div className="text-xs font-bold uppercase tracking-wider text-rose-300">
-              {hud.spectatingName
-                ? `Spectating: ${hud.spectatingName}`
-                : 'Eliminated — Free Camera'}
+          <div
+            className={`px-4 py-2 bg-[#0b0e14]/92 border rounded text-center ${
+              hud.mode === 'spectate' ? 'border-amber-400/40' : 'border-rose-500/40'
+            }`}
+          >
+            <div
+              className={`text-xs font-bold uppercase tracking-wider ${
+                hud.mode === 'spectate' ? 'text-amber-300' : 'text-rose-300'
+              }`}
+            >
+              {hud.mode === 'spectate'
+                ? hud.spectatingName
+                  ? `Spectating 5v5 Bots: ${hud.spectatingName} (${
+                      hud.spectatingTeam === 'attackers' ? 'ATK' : 'DEF'
+                    })`
+                  : 'Spectating 5v5 Bots — Free Camera'
+                : hud.spectatingName
+                  ? `Spectating: ${hud.spectatingName}`
+                  : 'Eliminated — Free Camera'}
             </div>
             <div className="text-[11px] text-slate-300 mt-0.5">
-              LMB Next · RMB Prev
+              LMB / Space Next · RMB Prev
               {hud.spectatingCanControl && (
                 <span className="text-amber-300 font-semibold"> · [E] Take Control</span>
               )}
+              {hud.mode === 'spectate' && ' · Tab Scoreboard · Esc Pause'}
             </div>
           </div>
         )}

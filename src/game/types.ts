@@ -1,5 +1,5 @@
 export type Team = 'attackers' | 'defenders';
-export type GameMode = 'bots' | 'pvp' | 'mixed';
+export type GameMode = 'bots' | 'pvp' | 'mixed' | 'spectate';
 export type BotDifficulty = number; // 1..100 scale (100 = max lethal bots)
 export type MapId = 'sandline' | 'dust2' | 'mirage' | 'inferno' | 'overpass';
 export type AppScreen = 'title' | 'playing' | 'paused' | 'gameover';
@@ -140,6 +140,7 @@ export interface HudSnapshot {
   spectatingName: string | null;
   spectatingTeam: Team | null;
   spectatingCanControl: boolean;
+  controllingBotName: string | null;
   hp: number;
   armor: number;
   hasHelmet: boolean;
@@ -165,6 +166,13 @@ export interface HudSnapshot {
   blindAlpha: number; // 0..1
   damageFlash: number; // 0..1
   hitmarker: 'none' | 'body' | 'head';
+  killConfirm: {
+    id: number;
+    victimName: string;
+    weaponName: string;
+    headshot: boolean;
+    reward: number;
+  } | null;
   interactPrompt: string | null;
   killFeed: KillFeedEntry[];
   radarBlips: RadarBlip[];

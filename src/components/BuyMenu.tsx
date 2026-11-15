@@ -104,7 +104,15 @@ export function BuyMenu({ hud, onBuy, onClose }: BuyMenuProps) {
                 >
                   <div className="flex items-center justify-between text-sm font-semibold">
                     <span>Kevlar Vest</span>
-                    <span className="tabular-nums text-emerald-400">
+                    <span
+                      className={`tabular-nums ${
+                        kevlarCost === null
+                          ? 'text-amber-300'
+                          : hud.cash >= kevlarCost
+                            ? 'text-emerald-400'
+                            : 'text-rose-400'
+                      }`}
+                    >
                       {kevlarCost === null ? 'EQUIPPED' : `$${kevlarCost}`}
                     </span>
                   </div>
@@ -121,7 +129,15 @@ export function BuyMenu({ hud, onBuy, onClose }: BuyMenuProps) {
                 >
                   <div className="flex items-center justify-between text-sm font-semibold">
                     <span>Kevlar + Helmet</span>
-                    <span className="tabular-nums text-emerald-400">
+                    <span
+                      className={`tabular-nums ${
+                        helmetCost === null
+                          ? 'text-amber-300'
+                          : hud.cash >= helmetCost
+                            ? 'text-emerald-400'
+                            : 'text-rose-400'
+                      }`}
+                    >
                       {helmetCost === null ? 'EQUIPPED' : `$${helmetCost}`}
                     </span>
                   </div>

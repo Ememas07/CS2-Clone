@@ -66,13 +66,13 @@ export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
-      if (mode !== 'bots') return;
+      if (mode !== 'bots' && mode !== 'spectate') return;
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'BUTTON') return;
       if (e.code === 'Enter' || e.code === 'Space') {
         e.preventDefault();
         onStartMatch({
-          mode: 'bots',
+          mode,
           mapId,
           playerTeam,
           playerName: playerName.trim() || 'Operator',
@@ -164,17 +164,18 @@ export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
             </div>
           </div>
 
-          {/* 3 Mode Tabs */}
+          {/* 4 Mode Tabs */}
           <div
             role="tablist"
             aria-label="Game Mode"
-            className="grid grid-cols-3 gap-1 p-1 bg-[#0b0e14] rounded-md mb-4 border border-white/10"
+            className="grid grid-cols-4 gap-1 p-1 bg-[#0b0e14] rounded-md mb-4 border border-white/10"
           >
             {(
               [
                 { id: 'bots', label: 'vs. Bots' },
+                { id: 'spectate', label: 'Watch Bots' },
                 { id: 'pvp', label: 'Players PvP' },
-                { id: 'mixed', label: 'Players + Bots' },
+                { id: 'mixed', label: 'Mixed' },
               ] as const
             ).map((tab) => (
               <button
@@ -186,7 +187,7 @@ export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
                   setMode(tab.id);
                   setLobbyError(null);
                 }}
-                className={`py-2 px-2 text-xs font-semibold rounded transition-colors whitespace-nowrap ${
+                className={`py-2 px-1.5 text-xs font-semibold rounded transition-colors whitespace-nowrap ${
                   mode === tab.id
                     ? 'bg-amber-500 text-slate-950'
                     : 'text-slate-300 hover:text-white hover:bg-white/5'
@@ -223,26 +224,28 @@ export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
           </div>
 
           {/* Player Name & Team Row */}
-          <div className="grid grid-cols-2 gap-3 mb-4">
-            <div>
-              <label
-                htmlFor="callsign-input"
-                className="block text-xs font-medium text-slate-300 mb-1"
-              >
-                Callsign
-              </label>
-              <input
-                id="callsign-input"
-                type="text"
-                maxLength={16}
-                value={playerName}
-                onChange={(e) => setPlayerName(e.target.value)}
-                className="w-full px-3 py-1.5 text-sm bg-[#0b0e14] border border-white/15 rounded text-white focus:outline-none focus:border-amber-400"
-              />
-            </div>
+          <div className={`grid ${mode === 'spectate' ? 'grid-cols-1' : 'grid-cols-2'} gap-3 mb-4`}>
+            {mode !== 'spectate' && (
+              <div>
+                <label
+                  htmlFor="callsign-input"
+                  className="block text-xs font-medium text-slate-300 mb-1"
+                >
+                  Callsign
+                </label>
+                <input
+                  id="callsign-input"
+                  type="text"
+                  maxLength={16}
+                  value={playerName}
+                  onChange={(e) => setPlayerName(e.target.value)}
+                  className="w-full px-3 py-1.5 text-sm bg-[#0b0e14] border border-white/15 rounded text-white focus:outline-none focus:border-amber-400"
+                />
+              </div>
+            )}
             <div>
               <span className="block text-xs font-medium text-slate-300 mb-1">
-                Starting Side
+                {mode === 'spectate' ? 'Initial Camera Side (LMB/RMB switches all bots)' : 'Starting Side'}
               </span>
               <div className="grid grid-cols-2 gap-1 bg-[#0b0e14] p-1 rounded border border-white/15">
                 <button
@@ -277,7 +280,7 @@ export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
             </div>
           </div>
 
-          {mode === 'bots' ? (
+          {mode === 'bots' || mode === 'spectate' ? (
             <div className="space-y-4">
               <div>
                 <div className="flex items-center justify-between text-xs mb-1">
@@ -329,7 +332,7 @@ export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
                 data-start="true"
                 onClick={() =>
                   onStartMatch({
-                    mode: 'bots',
+                    mode,
                     mapId,
                     playerTeam,
                     playerName: playerName.trim() || 'Operator',
@@ -339,7 +342,9 @@ export function MainMenu({ onStartMatch, onPreviewMap }: MainMenuProps) {
                 }
                 className="w-full py-3 px-5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm uppercase tracking-wider rounded transition-colors"
               >
-                Deploy on {selectedMapMeta.name} (5v5)
+                {mode === 'spectate'
+                  ? `Watch 5v5 Bots on ${selectedMapMeta.name}`
+                  : `Deploy on ${selectedMapMeta.name} (5v5)`}
               </button>
             </div>
           ) : (

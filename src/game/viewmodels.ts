@@ -11,6 +11,7 @@ export interface ViewmodelHandle {
   butterflyRightHandle?: THREE.Object3D;
   butterflyBlade?: THREE.Object3D;
   karambitPivot?: THREE.Object3D;
+  awpBoltPivot?: THREE.Group;
   c4LedMesh?: THREE.Mesh;
 }
 
@@ -74,6 +75,7 @@ export function buildWeaponViewmodel(weaponId: WeaponId): ViewmodelHandle {
   let butterflyRightHandle: THREE.Object3D | undefined;
   let butterflyBlade: THREE.Object3D | undefined;
   let karambitPivot: THREE.Object3D | undefined;
+  let awpBoltPivot: THREE.Group | undefined;
   let c4LedMesh: THREE.Mesh | undefined;
 
   // First-person forearm & glove framing (bottom-right tactical stance)
@@ -218,11 +220,26 @@ export function buildWeaponViewmodel(weaponId: WeaponId): ViewmodelHandle {
     scopeBell.rotation.x = Math.PI / 2;
     scopeBell.position.set(0, 0.082, -0.26);
     weaponPivot.add(scopeBell);
-    // Bolt handle
-    const bolt = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, 0.055, 8), chromeMat);
-    bolt.rotation.z = Math.PI / 2;
-    bolt.position.set(0.045, 0.032, 0.03);
-    weaponPivot.add(bolt);
+    // Articulated Bolt assembly (lift + pull back + push + lock)
+    awpBoltPivot = new THREE.Group();
+    awpBoltPivot.position.set(0.024, 0.036, 0.02);
+    const boltSleeve = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.011, 0.011, 0.085, 8),
+      chromeMat
+    );
+    boltSleeve.rotation.x = Math.PI / 2;
+    awpBoltPivot.add(boltSleeve);
+    const boltStem = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.006, 0.006, 0.048, 8),
+      chromeMat
+    );
+    boltStem.rotation.z = Math.PI / 2;
+    boltStem.position.set(0.026, -0.003, 0.012);
+    awpBoltPivot.add(boltStem);
+    const boltKnob = new THREE.Mesh(new THREE.SphereGeometry(0.011, 8, 8), chromeMat);
+    boltKnob.position.set(0.052, -0.005, 0.012);
+    awpBoltPivot.add(boltKnob);
+    weaponPivot.add(awpBoltPivot);
     const mag = new THREE.Mesh(new THREE.BoxGeometry(0.042, 0.085, 0.095), polymerMat);
     mag.position.set(0, -0.065, -0.1);
     weaponPivot.add(mag);
@@ -447,6 +464,7 @@ export function buildWeaponViewmodel(weaponId: WeaponId): ViewmodelHandle {
     butterflyRightHandle,
     butterflyBlade,
     karambitPivot,
+    awpBoltPivot,
     c4LedMesh,
   };
 }

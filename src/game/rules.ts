@@ -181,23 +181,49 @@ export function computeWeaponSpread(params: {
   scopeZoom: 0 | 1 | 2;
 }): number {
   const spec = WEAPONS[params.weaponId];
-  let spread = spec.baseSpread;
+  let spread = 0;
 
-  if (spec.hasScope && params.scopeZoom > 0) {
-    spread = 0.0005;
+  if (!params.isAirborne && params.horizontalSpeed <= 0.25) {
+    // Standing still: 0 movement inaccuracy (pinpoint first shot; spray bloom still applies during burst/spray)
+    spread = 0;
+  } else {
+    spread = spec.baseSpread;
+    const speedRatio = Math.min(
+      1,
+      Math.max(0, (params.horizontalSpeed - 0.25) / Math.max(1, spec.moveSpeed - 0.25))
+    );
+    // Slow walking (~<=0.60 max speed) gets mild controlled spread; running (>0.60) ramps sharply to full moveSpread
+    const moveFactor =
+      speedRatio <= 0.6
+        ? (speedRatio / 0.6) * 0.18
+        : 0.18 + Math.pow((speedRatio - 0.6) / 0.4, 1.35) * 0.82;
+    spread += spec.moveSpread * moveFactor;
   }
-
-  const speedNorm = Math.min(1, params.horizontalSpeed / Math.max(1, spec.moveSpeed));
-  spread += spec.moveSpread * speedNorm * speedNorm;
 
   if (params.isCrouching) {
     spread *= 0.72;
   }
   if (params.isAirborne) {
-    spread += 0.075;
+    spread += 0.11;
   }
-  spread += params.recoilBloom;
+  if (!(spec.hasScope && params.scopeZoom > 0)) {
+    spread += params.recoilBloom;
+  }
   return spread;
+}
+
+export function canPlantBombNow(params: {
+  isGrounded: boolean;
+  wishFwd: number;
+  wishStrafe: number;
+  horizontalSpeed: number;
+}): boolean {
+  return (
+    params.isGrounded &&
+    params.wishFwd === 0 &&
+    params.wishStrafe === 0 &&
+    params.horizontalSpeed <= 0.35
+  );
 }
 
 export type BuyValidationResult =

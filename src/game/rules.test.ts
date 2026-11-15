@@ -4,9 +4,11 @@ import {
   calculateBulletDamage,
   calculateHeExplosionDamage,
   canBuyWeapon,
+  canPlantBombNow,
   checkMatchWinner,
   computeLossBonus,
   computeRoundEndCash,
+  computeWeaponSpread,
   ECONOMY_CONSTANTS,
   getArmorPurchaseCost,
   getKillReward,
@@ -214,4 +216,74 @@ test('match progression: halftime and winner resolution', () => {
   assert.equal(checkMatchWinner(6, 5, 12), null);
   assert.equal(checkMatchWinner(7, 5, 12), 'attackers');
   assert.equal(checkMatchWinner(6, 6, 12), 'draw');
+});
+
+test('ballistics & movement: stationary accuracy is 0, slow walk < running, SMG running < rifle running', () => {
+  const awpStill = computeWeaponSpread({
+    weaponId: 'awp',
+    horizontalSpeed: 0,
+    isCrouching: false,
+    isAirborne: false,
+    recoilBloom: 0,
+    scopeZoom: 1,
+  });
+  assert.equal(awpStill, 0);
+
+  const akStill = computeWeaponSpread({
+    weaponId: 'ak47',
+    horizontalSpeed: 0,
+    isCrouching: false,
+    isAirborne: false,
+    recoilBloom: 0,
+    scopeZoom: 0,
+  });
+  assert.equal(akStill, 0);
+
+  const akWalk = computeWeaponSpread({
+    weaponId: 'ak47',
+    horizontalSpeed: 3.4,
+    isCrouching: false,
+    isAirborne: false,
+    recoilBloom: 0,
+    scopeZoom: 0,
+  });
+  const akRun = computeWeaponSpread({
+    weaponId: 'ak47',
+    horizontalSpeed: 6.45,
+    isCrouching: false,
+    isAirborne: false,
+    recoilBloom: 0,
+    scopeZoom: 0,
+  });
+  const mp7Run = computeWeaponSpread({
+    weaponId: 'mp7',
+    horizontalSpeed: 7.1,
+    isCrouching: false,
+    isAirborne: false,
+    recoilBloom: 0,
+    scopeZoom: 0,
+  });
+
+  assert.ok(akWalk > 0 && akWalk < 0.03, 'slow walk should be mildly inaccurate');
+  assert.ok(akRun > akWalk * 3, 'running rifle should be far less accurate than slow walk');
+  assert.ok(mp7Run < akRun * 0.4, 'running SMG should be much more accurate than running rifle');
+});
+
+test('bomb planting: requires standing still on ground', () => {
+  assert.equal(
+    canPlantBombNow({ isGrounded: true, wishFwd: 0, wishStrafe: 0, horizontalSpeed: 0 }),
+    true
+  );
+  assert.equal(
+    canPlantBombNow({ isGrounded: true, wishFwd: 1, wishStrafe: 0, horizontalSpeed: 0 }),
+    false
+  );
+  assert.equal(
+    canPlantBombNow({ isGrounded: true, wishFwd: 0, wishStrafe: 0, horizontalSpeed: 1.5 }),
+    false
+  );
+  assert.equal(
+    canPlantBombNow({ isGrounded: false, wishFwd: 0, wishStrafe: 0, horizontalSpeed: 0 }),
+    false
+  );
 });
