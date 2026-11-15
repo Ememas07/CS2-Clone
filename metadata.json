@@ -1,0 +1,6 @@
+{
+  "name": "Sandline Tactical",
+  "description": "Competitive 5v5 3D tactical first-person shooter with 3-lane sandstone arena, CS2-inspired economy, procedural PBR rendering, and WebSocket multiplayer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
