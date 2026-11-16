@@ -55,7 +55,7 @@ export const FFA_CONSTANTS = {
   TARGET_KILLS: 30,
   TIME_LIMIT_SECONDS: 300, // 5 minutes
   RESPAWN_SECONDS: 1.5,
-  SPAWN_PROTECTION_SECONDS: 1.5,
+  SPAWN_PROTECTION_SECONDS: 10.0,
   KILL_HEAL_HP: 50,
 };
 
@@ -322,18 +322,22 @@ export function canBuyWeapon(
     'team' | 'cash' | 'alive' | 'inBuyZone' | 'grenades' | 'primary' | 'secondary' | 'knife'
   >,
   weaponId: WeaponId,
-  isBuyPhase: boolean
+  isBuyPhase: boolean,
+  isFfa = false
 ): BuyValidationResult {
   if (!actor.alive) return { ok: false, reason: 'Cannot buy while eliminated' };
   if (!isBuyPhase) return { ok: false, reason: 'Buy phase has ended' };
-  if (!actor.inBuyZone) return { ok: false, reason: 'Leave spawn buy zone' };
+  if (!isFfa && !actor.inBuyZone) return { ok: false, reason: 'Leave spawn buy zone' };
 
   const spec = WEAPONS[weaponId];
   if (!spec || spec.category === 'c4') {
     return { ok: false, reason: 'Item unavailable' };
   }
-  if (spec.team !== 'both' && spec.team !== actor.team) {
+  if (!isFfa && spec.team !== 'both' && spec.team !== actor.team) {
     return { ok: false, reason: `Restricted to ${spec.team}` };
+  }
+  if (isFfa && spec.category === 'grenade') {
+    return { ok: false, reason: 'Disabled in FFA' };
   }
 
   if (spec.category === 'knife') {
@@ -358,6 +362,10 @@ export function canBuyWeapon(
   }
   if (spec.slot === 2 && actor.secondary?.id === weaponId) {
     return { ok: false, reason: `Already equipped ${spec.name}` };
+  }
+
+  if (isFfa) {
+    return { ok: true, cost: 0 };
   }
 
   if (actor.cash < spec.price) {

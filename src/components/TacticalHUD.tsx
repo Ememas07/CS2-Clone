@@ -617,8 +617,13 @@ export function TacticalHUD({
         )}
 
         {hud.localAlive && hud.spawnProtectionRemaining > 0 && (
-          <div className="px-3.5 py-1 bg-[#0b0e14]/90 border border-sky-400/50 rounded text-xs font-bold uppercase tracking-wider text-sky-300">
-            Spawn Protection {hud.spawnProtectionRemaining.toFixed(1)}s
+          <div className="px-4 py-1.5 bg-[#0b0e14]/95 border border-amber-400/70 rounded-md text-xs font-bold uppercase tracking-wider text-amber-300 shadow-xl flex items-center gap-2 font-tactical-mono animate-pulse">
+            <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+            <span>
+              {hud.mode === 'ffa'
+                ? `SPAWN PROTECTION: ${hud.spawnProtectionRemaining.toFixed(1)}s — PRESS [B] TO CHANGE WEAPONS`
+                : `Spawn Protection ${hud.spawnProtectionRemaining.toFixed(1)}s`}
+            </span>
           </div>
         )}
 
@@ -711,7 +716,7 @@ export function TacticalHUD({
               onClick={onOpenBuyMenu}
               className="pointer-events-auto self-start px-3 py-1.5 bg-emerald-600/90 hover:bg-emerald-500 text-white text-xs font-bold uppercase tracking-wider rounded border border-emerald-300/30 shadow"
             >
-              [B] Open Buy Menu
+              {hud.mode === 'ffa' ? '[B] Change Weapon' : '[B] Open Buy Menu'}
             </button>
           )}
           <div className="flex items-center gap-4 bg-[#0b0e14]/90 border border-white/15 rounded px-4 py-2.5 shadow-lg">

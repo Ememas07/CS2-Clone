@@ -97,6 +97,13 @@ export default function App() {
     };
   }, []);
 
+  const closeBuyMenu = useCallback(() => {
+    setBuyMenuOpen(false);
+    try {
+      engineRef.current?.requestPointerLock();
+    } catch {}
+  }, []);
+
   // Global HUD/Menu hotkeys: B (Buy Menu), F3 (Rebuy), Escape (Pause or close Buy Menu), M (Mute), Tab (Scoreboard)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -112,11 +119,12 @@ export default function App() {
       if (hud.screen === 'playing') {
         if (e.code === 'KeyB') {
           e.preventDefault();
-          setBuyMenuOpen((prev) => {
-            const next = !prev;
-            if (next) engine.exitPointerLock(true);
-            return next;
-          });
+          if (buyMenuOpen) {
+            closeBuyMenu();
+          } else if (hud.canBuy && hud.localAlive) {
+            engine.exitPointerLock(true);
+            setBuyMenuOpen(true);
+          }
           return;
         }
 
@@ -129,7 +137,7 @@ export default function App() {
         if (e.code === 'Escape') {
           e.preventDefault();
           if (buyMenuOpen) {
-            setBuyMenuOpen(false);
+            closeBuyMenu();
           } else {
             setShowScoreboard(false);
             engine.setScreen('paused');
@@ -162,14 +170,25 @@ export default function App() {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [buyMenuOpen, hud]);
+  }, [buyMenuOpen, closeBuyMenu, hud]);
 
   // Close buy menu automatically if buy phase ends or player dies
   useEffect(() => {
     if (buyMenuOpen && (!hud?.canBuy || !hud?.localAlive || hud?.screen !== 'playing')) {
-      setBuyMenuOpen(false);
+      closeBuyMenu();
     }
-  }, [buyMenuOpen, hud?.canBuy, hud?.localAlive, hud?.screen]);
+  }, [buyMenuOpen, closeBuyMenu, hud?.canBuy, hud?.localAlive, hud?.screen]);
+
+  // Whenever buyMenuOpen transitions from true -> false while playing, ensure pointer lock is requested
+  const prevBuyMenuOpenRef = useRef(buyMenuOpen);
+  useEffect(() => {
+    if (prevBuyMenuOpenRef.current && !buyMenuOpen && hud?.screen === 'playing') {
+      try {
+        engineRef.current?.requestPointerLock();
+      } catch {}
+    }
+    prevBuyMenuOpenRef.current = buyMenuOpen;
+  }, [buyMenuOpen, hud?.screen]);
 
   const handleBuyItem = useCallback((itemId: BuyableGearId) => {
     if (!engineRef.current) return { ok: false, reason: 'Engine unavailable' };
@@ -232,7 +251,17 @@ export default function App() {
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#0e1116]">
       {/* Dedicated isolated WebGL mount node */}
-      <div ref={mountRef} className="fixed inset-0" />
+      <div
+        ref={mountRef}
+        className="fixed inset-0"
+        onMouseDown={() => {
+          if (screen === 'playing' && !buyMenuOpen) {
+            try {
+              engineRef.current?.requestPointerLock();
+            } catch {}
+          }
+        }}
+      />
 
       {screen === 'title' && (
         <MainMenu
@@ -252,6 +281,7 @@ export default function App() {
           showScoreboard={showScoreboard}
           buyMenuOpen={buyMenuOpen}
           onOpenBuyMenu={() => {
+            if (!hud.canBuy || !hud.localAlive) return;
             engineRef.current?.exitPointerLock(true);
             setBuyMenuOpen(true);
           }}
@@ -268,10 +298,7 @@ export default function App() {
           hud={hud}
           onBuy={handleBuyItem}
           onRebuy={handleRebuyLoadout}
-          onClose={() => {
-            setBuyMenuOpen(false);
-            engineRef.current?.requestPointerLock();
-          }}
+          onClose={closeBuyMenu}
         />
       )}
 

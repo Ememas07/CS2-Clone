@@ -46,6 +46,7 @@ function StatBar({
 }
 
 export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
+  const isFfa = hud.mode === 'ffa';
   const [feedback, setFeedback] = useState<{ text: string; ok: boolean } | null>(null);
   const [hoveredWeaponId, setHoveredWeaponId] = useState<WeaponId>(
     hud.primaryId ?? hud.secondaryId ?? 'ak47'
@@ -54,24 +55,32 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
 
   const handlePurchase = useCallback(
     (id: BuyableGearId, label: string) => {
+      if (isFfa && WEAPONS[id as WeaponId]?.category === 'grenade') return;
       const res = onBuy(id);
       if (res.ok) {
         setFeedback({ text: `Equipped ${label}`, ok: true });
+        // In FFA mode, selecting an item equips it and immediately closes the buy menu
+        if (isFfa && WEAPONS[id as WeaponId]?.category !== 'knife') {
+          onClose();
+        }
       } else {
         setFeedback({ text: res.reason || 'Purchase unavailable', ok: false });
       }
     },
-    [onBuy]
+    [isFfa, onBuy, onClose]
   );
 
   const handleRebuyClick = useCallback(() => {
     const res = onRebuy();
     if (res.ok) {
       setFeedback({ text: 'Rebought previous loadout', ok: true });
+      if (isFfa) {
+        onClose();
+      }
     } else {
       setFeedback({ text: res.reason || 'Rebuy unavailable', ok: false });
     }
-  }, [onRebuy]);
+  }, [isFfa, onClose, onRebuy]);
 
   const canBuyPhase = hud.canBuy && hud.localAlive;
   const kevlarCost = hud.armor >= 100 ? null : ECONOMY_CONSTANTS.KEVLAR_PRICE;
@@ -85,23 +94,23 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
   const teamPrimaries = useMemo(
     () =>
       PRIMARY_ORDER.filter(
-        (id) => WEAPONS[id].team === 'both' || WEAPONS[id].team === hud.localTeam
+        (id) => isFfa || WEAPONS[id].team === 'both' || WEAPONS[id].team === hud.localTeam
       ),
-    [hud.localTeam]
+    [isFfa, hud.localTeam]
   );
   const teamSecondaries = useMemo(
     () =>
       SECONDARY_ORDER.filter(
-        (id) => WEAPONS[id].team === 'both' || WEAPONS[id].team === hud.localTeam
+        (id) => isFfa || WEAPONS[id].team === 'both' || WEAPONS[id].team === hud.localTeam
       ),
-    [hud.localTeam]
+    [isFfa, hud.localTeam]
   );
   const teamGrenades = useMemo(
     () =>
       GRENADE_ORDER.filter(
-        (id) => WEAPONS[id].team === 'both' || WEAPONS[id].team === hud.localTeam
+        (id) => !isFfa && (WEAPONS[id].team === 'both' || WEAPONS[id].team === hud.localTeam)
       ),
-    [hud.localTeam]
+    [isFfa, hud.localTeam]
   );
 
   // Number-key quick-buying (1-5 within focused category) + F3 Rebuy
@@ -132,6 +141,7 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
           handlePurchase(id, WEAPONS[id].name);
         }
       } else if (activeCategory === 'utility') {
+        if (isFfa) return; // Completely disable number-key utility buying in FFA
         const id = teamGrenades[idx];
         if (id) {
           setHoveredWeaponId(id);
@@ -144,6 +154,7 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
           handlePurchase(id, WEAPONS[id].name);
         }
       } else if (activeCategory === 'armor') {
+        if (isFfa) return;
         const gearOrder: Array<{ id: BuyableGearId; label: string }> = [
           { id: 'kevlar', label: 'Kevlar Vest' },
           { id: 'kevlar_helmet', label: 'Kevlar + Helmet' },
@@ -163,6 +174,7 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
     handlePurchase,
     handleRebuyClick,
     hud.localTeam,
+    isFfa,
     teamGrenades,
     teamPrimaries,
     teamSecondaries,
@@ -190,16 +202,18 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
             </h2>
             <span
               className={`px-2.5 py-0.5 rounded text-xs font-bold uppercase ${
-                hud.localTeam === 'attackers'
-                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                  : 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                isFfa
+                  ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                  : hud.localTeam === 'attackers'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                    : 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
               }`}
             >
-              {hud.localTeam === 'attackers' ? 'Attackers' : 'Defenders'}
+              {isFfa ? 'Free-For-All' : hud.localTeam === 'attackers' ? 'Attackers' : 'Defenders'}
             </span>
             {!canBuyPhase && (
               <span className="text-xs font-semibold text-rose-400">
-                Buy phase closed or outside spawn zone
+                {isFfa ? 'Spawn protection window closed' : 'Buy phase closed or outside spawn zone'}
               </span>
             )}
           </div>
@@ -224,7 +238,7 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
               onClick={onClose}
               className="px-3.5 py-1.5 text-xs font-bold uppercase bg-slate-800 hover:bg-slate-700 text-white border border-white/15 rounded"
             >
-              Close [B]
+              Close / Resume [B]
             </button>
           </div>
         </div>
@@ -337,7 +351,7 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
                   </p>
                 </button>
 
-                {hud.localTeam === 'defenders' && (
+                {hud.localTeam === 'defenders' && !isFfa && (
                   <button
                     type="button"
                     disabled={!canBuyPhase || hud.hasDefuseKit}
@@ -382,9 +396,9 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
               <div className="space-y-1.5">
                 {SECONDARY_ORDER.map((id) => {
                   const spec = WEAPONS[id];
-                  const teamAllowed = spec.team === 'both' || spec.team === hud.localTeam;
+                  const teamAllowed = isFfa || spec.team === 'both' || spec.team === hud.localTeam;
                   const owned = hud.secondaryId === id;
-                  const affordable = hud.cash >= spec.price;
+                  const affordable = isFfa || hud.cash >= spec.price;
                   const keyIdx = teamSecondaries.indexOf(id);
                   return (
                     <button
@@ -428,7 +442,9 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
                               ? spec.team === 'attackers'
                                 ? 'ATK ONLY'
                                 : 'DEF ONLY'
-                              : `$${spec.price}`}
+                              : isFfa
+                                ? 'FREE'
+                                : `$${spec.price}`}
                         </span>
                       </div>
                       <p className="text-[11px] text-slate-400 mt-0.5 line-clamp-1">
@@ -449,9 +465,9 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
             <div className="space-y-1.5">
               {PRIMARY_ORDER.map((id) => {
                 const spec = WEAPONS[id];
-                const teamAllowed = spec.team === 'both' || spec.team === hud.localTeam;
+                const teamAllowed = isFfa || spec.team === 'both' || spec.team === hud.localTeam;
                 const owned = hud.primaryId === id;
-                const affordable = hud.cash >= spec.price;
+                const affordable = isFfa || hud.cash >= spec.price;
                 const keyIdx = teamPrimaries.indexOf(id);
                 return (
                   <button
@@ -495,7 +511,9 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
                             ? spec.team === 'attackers'
                               ? 'ATK ONLY'
                               : 'DEF ONLY'
-                            : `$${spec.price.toLocaleString()}`}
+                            : isFfa
+                              ? 'FREE'
+                              : `$${spec.price.toLocaleString()}`}
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-0.5">
@@ -510,13 +528,20 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
 
           {/* Column 3: Grenades (Slot 4) */}
           <div onMouseEnter={() => setActiveCategory('utility')}>
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-              Slot 4 · Utility Grenades ({hud.grenades.length}/4) {activeCategory === 'utility' ? '· [1-5]' : ''}
-            </h3>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                Slot 4 · Utility {isFfa ? '' : `(${hud.grenades.length}/4)`} {!isFfa && activeCategory === 'utility' ? '· [1-5]' : ''}
+              </h3>
+              {isFfa && (
+                <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                  Disabled in FFA
+                </span>
+              )}
+            </div>
             <div className="space-y-1.5">
               {GRENADE_ORDER.map((id) => {
                 const spec = WEAPONS[id];
-                const teamAllowed = spec.team === 'both' || spec.team === hud.localTeam;
+                const teamAllowed = !isFfa && (spec.team === 'both' || spec.team === hud.localTeam);
                 const count = hud.grenades.filter((g) => g === id).length;
                 const maxed =
                   hud.grenades.length >= 4 ||
@@ -527,49 +552,57 @@ export function BuyMenu({ hud, onBuy, onRebuy, onClose }: BuyMenuProps) {
                   <button
                     key={id}
                     type="button"
-                    disabled={!canBuyPhase || maxed || !teamAllowed}
+                    disabled={isFfa || !canBuyPhase || maxed || !teamAllowed}
                     onMouseEnter={() => setHoveredWeaponId(id)}
                     onFocus={() => setHoveredWeaponId(id)}
                     onClick={() => handlePurchase(id, spec.name)}
                     className={`w-full text-left p-2.5 rounded border transition-colors ${
-                      count > 0
-                        ? 'bg-amber-500/10 border-amber-400/50'
-                        : !teamAllowed
-                          ? 'bg-[#0b0e14]/60 border-white/5 opacity-45 cursor-not-allowed'
-                          : 'bg-[#0b0e14] border-white/10 hover:border-amber-400/60'
+                      isFfa
+                        ? 'bg-[#0b0e14]/50 border-white/5 opacity-40 cursor-not-allowed'
+                        : count > 0
+                          ? 'bg-amber-500/10 border-amber-400/50'
+                          : !teamAllowed
+                            ? 'bg-[#0b0e14]/60 border-white/5 opacity-45 cursor-not-allowed'
+                            : 'bg-[#0b0e14] border-white/10 hover:border-amber-400/60'
                     } disabled:opacity-60`}
                   >
                     <div className="flex items-center justify-between text-sm font-bold">
-                      <span>
-                        {activeCategory === 'utility' && keyIdx >= 0 && (
+                      <span className={isFfa ? 'text-slate-500' : ''}>
+                        {!isFfa && activeCategory === 'utility' && keyIdx >= 0 && (
                           <span className="font-tactical-mono text-amber-400 mr-1.5">
                             [{keyIdx + 1}]
                           </span>
                         )}
                         {spec.name}
-                        {count > 0 ? ` (${count})` : ''}
+                        {!isFfa && count > 0 ? ` (${count})` : ''}
                       </span>
                       <span
                         className={`tabular-nums text-xs ${
-                          !teamAllowed
-                            ? 'text-slate-500'
-                            : maxed
-                              ? 'text-amber-300'
-                              : affordable
-                                ? 'text-emerald-400'
-                                : 'text-rose-400'
+                          isFfa
+                            ? 'text-rose-400 font-bold'
+                            : !teamAllowed
+                              ? 'text-slate-500'
+                              : maxed
+                                ? 'text-amber-300'
+                                : affordable
+                                  ? 'text-emerald-400'
+                                  : 'text-rose-400'
                         }`}
                       >
-                        {!teamAllowed
-                          ? spec.team === 'attackers'
-                            ? 'ATK ONLY'
-                            : 'DEF ONLY'
-                          : maxed
-                            ? 'MAX'
-                            : `$${spec.price}`}
+                        {isFfa
+                          ? 'DISABLED'
+                          : !teamAllowed
+                            ? spec.team === 'attackers'
+                              ? 'ATK ONLY'
+                              : 'DEF ONLY'
+                            : maxed
+                              ? 'MAX'
+                              : `$${spec.price}`}
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-400 mt-0.5">{spec.description}</p>
+                    <p className={`text-[11px] mt-0.5 ${isFfa ? 'text-slate-600' : 'text-slate-400'}`}>
+                      {isFfa ? 'Utility disabled in Free-For-All' : spec.description}
+                    </p>
                   </button>
                 );
               })}

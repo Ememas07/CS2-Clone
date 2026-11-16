@@ -906,17 +906,21 @@ export class GameEngine {
   public requestPointerLock(): void {
     if (this.screen !== 'playing') return;
     soundEngine.unlock();
-    const el = this.renderer.domElement;
+    const el = this.renderer?.domElement;
+    if (!el) return;
     try {
-      const maybePromise = (
+      const p1 = (
         el.requestPointerLock as unknown as (opts?: {
           unadjustedMovement?: boolean;
         }) => Promise<void> | undefined
       )?.({ unadjustedMovement: true });
-      if (maybePromise && typeof maybePromise.catch === 'function') {
-        maybePromise.catch(() => {
+      if (p1 && typeof p1.catch === 'function') {
+        p1.catch(() => {
           try {
-            el.requestPointerLock?.();
+            const p2 = (el.requestPointerLock as unknown as () => Promise<void> | undefined)?.();
+            if (p2 && typeof p2.catch === 'function') {
+              p2.catch(() => {});
+            }
           } catch {
             // Ignore in restricted environments
           }
@@ -924,7 +928,10 @@ export class GameEngine {
       }
     } catch {
       try {
-        el.requestPointerLock?.();
+        const p2 = (el.requestPointerLock as unknown as () => Promise<void> | undefined)?.();
+        if (p2 && typeof p2.catch === 'function') {
+          p2.catch(() => {});
+        }
       } catch {
         // Ignore in headless environments
       }
@@ -1044,7 +1051,9 @@ export class GameEngine {
       return;
     }
 
-    if (!this.pointerLocked) {
+    const isLocked = document.pointerLockElement === this.renderer?.domElement;
+    if (!isLocked) {
+      this.pointerLocked = false;
       this.requestPointerLock();
     }
 
@@ -1732,8 +1741,17 @@ export class GameEngine {
     const local = this.getLocalActor();
     if (!local) return { ok: false, reason: 'No active player' };
     if (!this.lastBuyLoadout) return { ok: false, reason: 'No previous loadout saved' };
-    if (!local.alive || this.phase !== 'buy' || !local.inBuyZone) {
-      return { ok: false, reason: 'Buy phase closed or outside buy zone' };
+    const isFfa = this.config.mode === 'ffa';
+    const canBuyNow = isFfa
+      ? (local.spawnProtectionTimer ?? 0) > 0
+      : this.phase === 'buy' && local.inBuyZone;
+    if (!local.alive || !canBuyNow) {
+      return {
+        ok: false,
+        reason: isFfa
+          ? 'Spawn protection buy window has expired'
+          : 'Buy phase closed or outside buy zone',
+      };
     }
 
     const snap = {
@@ -1742,11 +1760,11 @@ export class GameEngine {
     };
     let boughtAny = false;
 
-    if (snap.armor !== 'none') {
+    if (!isFfa && snap.armor !== 'none') {
       const res = this.buyWeaponOrItem(snap.armor);
       if (res.ok) boughtAny = true;
     }
-    if (snap.hasDefuseKit && local.team === 'defenders') {
+    if (!isFfa && snap.hasDefuseKit && local.team === 'defenders') {
       const res = this.buyWeaponOrItem('defuse_kit');
       if (res.ok) boughtAny = true;
     }
@@ -1758,13 +1776,16 @@ export class GameEngine {
       const res = this.buyWeaponOrItem(snap.secondaryId);
       if (res.ok) boughtAny = true;
     }
-    for (const g of snap.grenades) {
-      const res = this.buyWeaponOrItem(g);
-      if (res.ok) boughtAny = true;
+    // In FFA, grenades are completely stripped and excluded from rebuy
+    if (!isFfa) {
+      for (const g of snap.grenades) {
+        const res = this.buyWeaponOrItem(g);
+        if (res.ok) boughtAny = true;
+      }
     }
 
     if (!boughtAny) {
-      return { ok: false, reason: 'Already equipped or insufficient funds' };
+      return { ok: false, reason: 'Already equipped or purchase unavailable' };
     }
     soundEngine.playUiTick(960);
     this.emitHud(true);
@@ -1774,15 +1795,27 @@ export class GameEngine {
   public buyWeaponOrItem(itemId: BuyableGearId): { ok: boolean; reason?: string } {
     const local = this.getLocalActor();
     if (!local) return { ok: false, reason: 'No active player' };
-    if (this.config.mode === 'awp' || this.config.mode === 'ffa') {
+    if (this.config.mode === 'awp') {
       return { ok: false, reason: 'Buy menu disabled in this mode' };
     }
-    const isBuy = this.phase === 'buy';
+    const isFfa = this.config.mode === 'ffa';
+    const isBuy = isFfa ? (local.spawnProtectionTimer ?? 0) > 0 : this.phase === 'buy';
+
+    if (!local.alive) return { ok: false, reason: 'Cannot buy while dead' };
+    if (!isBuy) {
+      return {
+        ok: false,
+        reason: isFfa
+          ? 'Spawn protection buy window has expired'
+          : 'Buy phase ended',
+      };
+    }
+    if (!isFfa && !local.inBuyZone) {
+      return { ok: false, reason: 'Outside spawn buy zone' };
+    }
 
     if (itemId === 'kevlar' || itemId === 'kevlar_helmet') {
-      if (!local.alive) return { ok: false, reason: 'Cannot buy while dead' };
-      if (!isBuy) return { ok: false, reason: 'Buy phase ended' };
-      if (!local.inBuyZone) return { ok: false, reason: 'Outside spawn buy zone' };
+      if (isFfa) return { ok: false, reason: 'Kevlar + Helmet is already equipped in FFA' };
       const cost = getArmorPurchaseCost(local, itemId);
       if (cost === null) return { ok: false, reason: 'Armor already equipped' };
       if (local.cash < cost) return { ok: false, reason: 'Insufficient funds' };
@@ -1796,10 +1829,9 @@ export class GameEngine {
     }
 
     if (itemId === 'defuse_kit') {
-      if (!local.alive) return { ok: false, reason: 'Cannot buy while dead' };
-      if (!isBuy) return { ok: false, reason: 'Buy phase ended' };
-      if (!local.inBuyZone) return { ok: false, reason: 'Outside spawn buy zone' };
-      if (local.team !== 'defenders') return { ok: false, reason: 'Defenders only' };
+      if (isFfa || local.team !== 'defenders') {
+        return { ok: false, reason: isFfa ? 'Disabled in FFA' : 'Defenders only' };
+      }
       if (local.hasDefuseKit) return { ok: false, reason: 'Defuse Kit already equipped' };
       if (local.cash < ECONOMY_CONSTANTS.DEFUSE_KIT_PRICE) {
         return { ok: false, reason: 'Insufficient funds' };
@@ -1814,10 +1846,12 @@ export class GameEngine {
 
     if (itemId === 'none') return { ok: false };
 
-    const check = canBuyWeapon(local, itemId, isBuy);
+    const check = canBuyWeapon(local, itemId, isBuy, isFfa);
     if (!check.ok) return check;
 
-    local.cash -= check.cost;
+    if (!isFfa) {
+      local.cash -= check.cost;
+    }
     const spec = WEAPONS[itemId];
     if (spec.category === 'knife') {
       local.knife = itemId as KnifeId;
@@ -1833,6 +1867,7 @@ export class GameEngine {
       this.triggerEquipAnim(itemId);
       this.recordLoadoutSnapshot(local);
     } else if (spec.slot === 4) {
+      if (isFfa) return { ok: false, reason: 'Utility is disabled in FFA mode' };
       local.grenades.push(itemId as GrenadeId);
       local.activeSlot = 4;
       this.recordLoadoutSnapshot(local);
@@ -3803,6 +3838,7 @@ export class GameEngine {
           actor.spawnProtectionTimer = FFA_CONSTANTS.SPAWN_PROTECTION_SECONDS;
           actor.primary = createWeaponInstance(actor.team === 'attackers' ? 'ak47' : 'm4a1s');
           actor.secondary = createWeaponInstance('deagle');
+          actor.grenades = [];
           actor.activeSlot = 1;
 
           if (actor.isLocal) {
@@ -4737,7 +4773,7 @@ export class GameEngine {
         hasHelmet: false,
         cash: 800,
         inBuyZone: true,
-        canBuy: this.config.mode !== 'awp' && this.config.mode !== 'ffa',
+        canBuy: this.config.mode !== 'awp',
         activeSlot: 2,
         activeWeaponId: getStarterPistol(this.config.playerTeam),
         activeWeaponName: WEAPONS[getStarterPistol(this.config.playerTeam)].name,
@@ -4956,9 +4992,13 @@ export class GameEngine {
       canBuy:
         !isSpectateMode &&
         this.config.mode !== 'awp' &&
-        !isFfa &&
         !this.controllingBotId &&
-        Boolean(local?.alive && local.inBuyZone && this.phase === 'buy'),
+        Boolean(
+          local?.alive &&
+            (isFfa
+              ? (local.spawnProtectionTimer ?? 0) > 0
+              : local.inBuyZone && this.phase === 'buy')
+        ),
       activeSlot: displayActor.activeSlot,
       activeWeaponId: activeId,
       activeWeaponName: WEAPONS[activeId].name,
