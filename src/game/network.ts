@@ -67,6 +67,14 @@ export interface NetworkCallbacks {
   ) => void;
 }
 
+function extractGameSlug(pathname: string): string {
+  const segments = pathname.split('/').filter(Boolean);
+  const candidate = segments.find(
+    (seg) => !seg.includes('.') && seg.toLowerCase() !== 'index'
+  );
+  return candidate || 'CS2-Clone';
+}
+
 export function getDefaultWebSocketUrl(customUrl?: string): string {
   if (typeof window === 'undefined') {
     if (customUrl && customUrl.trim()) {
@@ -81,7 +89,7 @@ export function getDefaultWebSocketUrl(customUrl?: string): string {
   }
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const gameSlug = window.location.pathname.split('/').filter(Boolean)[0] || 'CS2-Clone';
+  const gameSlug = extractGameSlug(window.location.pathname);
 
   if (!customUrl || !customUrl.trim()) {
     return `${protocol}//${window.location.host}/ws?game=${encodeURIComponent(gameSlug)}`;
@@ -300,13 +308,23 @@ export class TacticalNetworkClient {
 
       ws.onerror = () => {
         this.stopHeartbeat();
-        this.callbacks.onStatusChange?.('disconnected', 'WebSocket connection error');
+        this.callbacks.onStatusChange?.(
+          'disconnected',
+          `Cannot connect to WebSocket server at ${targetUrl}. Please verify the server is running.`
+        );
         this.scheduleReconnect();
       };
 
-      ws.onclose = () => {
+      ws.onclose = (evt) => {
         this.stopHeartbeat();
-        this.callbacks.onStatusChange?.('disconnected');
+        const reason = evt.reason ? ` (${evt.reason})` : '';
+        const wasClean = evt.wasClean
+          ? 'Disconnected from server.'
+          : `Connection closed${reason}. Reconnecting...`;
+        this.callbacks.onStatusChange?.(
+          'disconnected',
+          this.intentionalDisconnect ? undefined : wasClean
+        );
         this.scheduleReconnect();
       };
     } catch (err) {

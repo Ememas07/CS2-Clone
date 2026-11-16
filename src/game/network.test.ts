@@ -15,7 +15,6 @@ test('getDefaultWebSocketUrl in SSR / node environment without window', () => {
 test('getDefaultWebSocketUrl in browser environment with root pathname', () => {
   const originalWindow = globalThis.window;
   try {
-    // @ts-expect-error Mocking window for test
     globalThis.window = {
       location: {
         protocol: 'http:',
@@ -23,7 +22,7 @@ test('getDefaultWebSocketUrl in browser environment with root pathname', () => {
         pathname: '/',
         href: 'http://localhost:5173/',
       },
-    };
+    } as unknown as Window & typeof globalThis;
 
     assert.equal(
       getDefaultWebSocketUrl(),
@@ -34,10 +33,44 @@ test('getDefaultWebSocketUrl in browser environment with root pathname', () => {
   }
 });
 
+test('getDefaultWebSocketUrl ignores index.html or dot-extensions in pathname', () => {
+  const originalWindow = globalThis.window;
+  try {
+    // 1. Direct index.html access
+    globalThis.window = {
+      location: {
+        protocol: 'https:',
+        host: 'marc-mas.ddns.net',
+        pathname: '/index.html',
+        href: 'https://marc-mas.ddns.net/index.html',
+      },
+    } as unknown as Window & typeof globalThis;
+    assert.equal(
+      getDefaultWebSocketUrl(),
+      'wss://marc-mas.ddns.net/ws?game=CS2-Clone'
+    );
+
+    // 2. Custom path with index.html at the end
+    globalThis.window = {
+      location: {
+        protocol: 'https:',
+        host: 'marc-mas.ddns.net',
+        pathname: '/CS2-Clone/index.html',
+        href: 'https://marc-mas.ddns.net/CS2-Clone/index.html',
+      },
+    } as unknown as Window & typeof globalThis;
+    assert.equal(
+      getDefaultWebSocketUrl(),
+      'wss://marc-mas.ddns.net/ws?game=CS2-Clone'
+    );
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
 test('getDefaultWebSocketUrl in browser environment with https and custom game slug in path', () => {
   const originalWindow = globalThis.window;
   try {
-    // @ts-expect-error Mocking window for test
     globalThis.window = {
       location: {
         protocol: 'https:',
@@ -45,7 +78,7 @@ test('getDefaultWebSocketUrl in browser environment with https and custom game s
         pathname: '/tactical-ops/lobby/42',
         href: 'https://play.example.com/tactical-ops/lobby/42',
       },
-    };
+    } as unknown as Window & typeof globalThis;
 
     assert.equal(
       getDefaultWebSocketUrl(),
@@ -59,7 +92,6 @@ test('getDefaultWebSocketUrl in browser environment with https and custom game s
 test('getDefaultWebSocketUrl encodes special characters in game slug', () => {
   const originalWindow = globalThis.window;
   try {
-    // @ts-expect-error Mocking window for test
     globalThis.window = {
       location: {
         protocol: 'https:',
@@ -67,7 +99,7 @@ test('getDefaultWebSocketUrl encodes special characters in game slug', () => {
         pathname: '/game special&name/room',
         href: 'https://play.example.com/game%20special&name/room',
       },
-    };
+    } as unknown as Window & typeof globalThis;
 
     assert.equal(
       getDefaultWebSocketUrl(),
@@ -81,7 +113,6 @@ test('getDefaultWebSocketUrl encodes special characters in game slug', () => {
 test('getDefaultWebSocketUrl and fallback helper when user clears URL', () => {
   const originalWindow = globalThis.window;
   try {
-    // @ts-expect-error Mocking window for test
     globalThis.window = {
       location: {
         protocol: 'https:',
@@ -89,7 +120,7 @@ test('getDefaultWebSocketUrl and fallback helper when user clears URL', () => {
         pathname: '/CS2-Clone/',
         href: 'https://play.example.com/CS2-Clone/',
       },
-    };
+    } as unknown as Window & typeof globalThis;
 
     // User clears the input (empty string or whitespace)
     assert.equal(getDefaultWebSocketUrl(''), 'wss://play.example.com/ws?game=CS2-Clone');
@@ -103,7 +134,6 @@ test('getDefaultWebSocketUrl and fallback helper when user clears URL', () => {
 test('getDefaultWebSocketUrl appends ?game= to custom URLs without game parameter', () => {
   const originalWindow = globalThis.window;
   try {
-    // @ts-expect-error Mocking window for test
     globalThis.window = {
       location: {
         protocol: 'https:',
@@ -111,7 +141,7 @@ test('getDefaultWebSocketUrl appends ?game= to custom URLs without game paramete
         pathname: '/custom-slug/',
         href: 'https://play.example.com/custom-slug/',
       },
-    };
+    } as unknown as Window & typeof globalThis;
 
     // Custom ws URL without query
     assert.equal(
@@ -147,7 +177,6 @@ test('TacticalNetworkClient fallback and custom URL handling', () => {
   let openedUrl: string | null = null;
 
   try {
-    // @ts-expect-error Mocking window for test
     globalThis.window = {
       location: {
         protocol: 'http:',
@@ -157,17 +186,16 @@ test('TacticalNetworkClient fallback and custom URL handling', () => {
       },
       clearTimeout: () => {},
       setTimeout: () => 1,
-    };
+    } as unknown as Window & typeof globalThis;
 
     // Mock WebSocket constructor
-    // @ts-expect-error Mocking WebSocket
     globalThis.WebSocket = class MockWebSocket {
       public readyState = 0;
       constructor(url: string) {
         openedUrl = url;
       }
       close() {}
-    };
+    } as unknown as typeof WebSocket;
 
     const client = new TacticalNetworkClient();
 

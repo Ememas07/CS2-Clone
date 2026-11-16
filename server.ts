@@ -211,13 +211,18 @@ async function startServer(): Promise<void> {
   server.on('upgrade', (request, socket, head) => {
     try {
       const url = new URL(request.url || '', `http://${request.headers.host || 'localhost'}`);
+      const clientIp = request.headers['x-forwarded-for'] || request.socket.remoteAddress;
+      console.log(`[upgrade] HTTP upgrade request: ${request.url} from ${clientIp}`);
       if (url.pathname === '/ws') {
         wss.handleUpgrade(request, socket, head, (ws) => {
           wss.emit('connection', ws, request);
         });
         return;
       }
-    } catch {
+      console.log(`[upgrade] Rejected upgrade on non-/ws path: ${url.pathname}`);
+      socket.destroy();
+    } catch (err) {
+      console.warn('[upgrade] Error during upgrade:', err);
       socket.destroy();
     }
   });
@@ -287,8 +292,12 @@ async function startServer(): Promise<void> {
     }
   });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, request) => {
     const clientId = `p_${nextClientNum++}_${Math.random().toString(36).slice(2, 6)}`;
+    const clientIp = request
+      ? request.headers['x-forwarded-for'] || request.socket.remoteAddress
+      : 'unknown';
+    console.log(`[ws] Client connected: ${clientId} (${clientIp})`);
     const meta: ClientMeta = {
       id: clientId,
       name: `Operator ${nextClientNum - 1}`,
@@ -426,6 +435,7 @@ async function startServer(): Promise<void> {
           customMapData: safeCustomMap,
         };
         rooms.set(roomId, room);
+        console.log(`[room] Room created: ${roomId} by client ${meta.id} (mode: ${mode}, map: ${mapId})`);
         sendJson(ws, {
           type: 'room_joined',
           room: serializeRoom(room),
@@ -438,10 +448,12 @@ async function startServer(): Promise<void> {
         const roomId = String(msg.roomId || '').trim().toUpperCase();
         const room = rooms.get(roomId);
         if (!room) {
+          console.log(`[room] Client ${meta.id} failed to join room ${roomId}: not found`);
           sendJson(ws, { type: 'room_error', error: `Room ${roomId || 'CODE'} not found` });
           return;
         }
         if (room.clients.size >= 10) {
+          console.log(`[room] Client ${meta.id} failed to join room ${roomId}: room full`);
           sendJson(ws, { type: 'room_error', error: 'Room is full (10/10)' });
           return;
         }
@@ -460,6 +472,7 @@ async function startServer(): Promise<void> {
         }
         meta.roomId = roomId;
         room.clients.set(meta.id, meta);
+        console.log(`[room] Client ${meta.id} joined room ${roomId} (mode: ${room.mode}, team: ${meta.team})`);
 
         sendJson(ws, {
           type: 'room_joined',
@@ -527,7 +540,8 @@ async function startServer(): Promise<void> {
       }
     });
 
-    ws.on('close', () => {
+    ws.on('close', (code) => {
+      console.log(`[ws] Client disconnected: ${meta.id}${meta.roomId ? ` (was in room ${meta.roomId})` : ''} code: ${code}`);
       clients.delete(ws);
       if (!meta.roomId) return;
       const room = rooms.get(meta.roomId);

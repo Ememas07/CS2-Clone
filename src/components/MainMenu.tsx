@@ -106,7 +106,11 @@ export function MainMenu({
     networkClient.setCallbacks({
       onStatusChange: (status, err) => {
         setWsStatus(status);
-        if (err) setLobbyError(err);
+        if (err) {
+          setLobbyError(err);
+        } else if (status === 'connected') {
+          setLobbyError(null);
+        }
       },
       onWelcome: (id) => setYourId(id),
       onRoomJoined: (r, id) => {
@@ -203,6 +207,17 @@ export function MainMenu({
     showCustomMapModal,
   ]);
 
+  // Auto-connect to WebSocket server when viewing multiplayer lobby
+  useEffect(() => {
+    if (!isOfflineStartMode && wsStatus === 'disconnected') {
+      const target = getDefaultWebSocketUrl(wsUrl);
+      if (target !== wsUrl) {
+        setWsUrl(target);
+      }
+      networkClient.connect(target);
+    }
+  }, [isOfflineStartMode, wsStatus, wsUrl]);
+
   const handleSelectMode = (nextMode: GameMode) => {
     setMode(nextMode);
     setLobbyError(null);
@@ -231,7 +246,12 @@ export function MainMenu({
 
   const handleCreateRoom = () => {
     setLobbyError(null);
-    if (wsStatus !== 'connected') {
+    if (wsStatus === 'connecting') {
+      setLobbyError('Connecting to game server... Please wait a moment.');
+      return;
+    }
+    if (wsStatus === 'disconnected') {
+      setLobbyError('Connecting to game server...');
       const target = getDefaultWebSocketUrl(wsUrl);
       if (target !== wsUrl) {
         setWsUrl(target);
@@ -256,7 +276,12 @@ export function MainMenu({
       return;
     }
     setLobbyError(null);
-    if (wsStatus !== 'connected') {
+    if (wsStatus === 'connecting') {
+      setLobbyError('Connecting to game server... Please wait a moment.');
+      return;
+    }
+    if (wsStatus === 'disconnected') {
+      setLobbyError('Connecting to game server...');
       const target = getDefaultWebSocketUrl(wsUrl);
       if (target !== wsUrl) {
         setWsUrl(target);
@@ -693,7 +718,18 @@ export function MainMenu({
                   htmlFor="ws-override"
                   className="block text-xs font-medium text-slate-300 mb-1"
                 >
-                  WebSocket Server URL ({wsStatus})
+                  WebSocket Server URL{' '}
+                  <span
+                    className={`font-semibold ${
+                      wsStatus === 'connected'
+                        ? 'text-emerald-400'
+                        : wsStatus === 'connecting'
+                          ? 'text-amber-400'
+                          : 'text-rose-400'
+                    }`}
+                  >
+                    ({wsStatus})
+                  </span>
                 </label>
                 <div className="flex gap-2">
                   <input
@@ -792,17 +828,24 @@ export function MainMenu({
                   <button
                     type="button"
                     onClick={handleCreateRoom}
-                    className="w-full py-2.5 px-4 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs uppercase tracking-wider rounded transition-colors"
+                    disabled={wsStatus === 'connecting'}
+                    className="w-full py-2.5 px-4 bg-amber-500 hover:bg-amber-400 disabled:bg-amber-500/50 disabled:cursor-wait text-slate-950 font-bold text-xs uppercase tracking-wider rounded transition-colors"
                   >
-                    Create{' '}
-                    {mode === 'mixed'
-                      ? 'Mixed (5v5)'
-                      : mode === 'awp'
-                        ? 'AWP Room'
-                        : mode === 'ffa'
-                          ? 'FFA Room'
-                          : 'PvP Room'}{' '}
-                    on {selectedMapMeta.name}
+                    {wsStatus === 'connecting' ? (
+                      'Connecting to Server...'
+                    ) : (
+                      <>
+                        Create{' '}
+                        {mode === 'mixed'
+                          ? 'Mixed (5v5)'
+                          : mode === 'awp'
+                            ? 'AWP Room'
+                            : mode === 'ffa'
+                              ? 'FFA Room'
+                              : 'PvP Room'}{' '}
+                        on {selectedMapMeta.name}
+                      </>
+                    )}
                   </button>
                   <div className="flex gap-2">
                     <input
@@ -817,9 +860,10 @@ export function MainMenu({
                     <button
                       type="button"
                       onClick={handleJoinRoom}
-                      className="px-4 py-2 text-xs font-bold uppercase bg-sky-600 hover:bg-sky-500 text-white rounded whitespace-nowrap"
+                      disabled={wsStatus === 'connecting'}
+                      className="px-4 py-2 text-xs font-bold uppercase bg-sky-600 hover:bg-sky-500 disabled:bg-sky-600/50 disabled:cursor-wait text-white rounded whitespace-nowrap"
                     >
-                      Join Room
+                      {wsStatus === 'connecting' ? 'Connecting...' : 'Join Room'}
                     </button>
                   </div>
                 </div>
