@@ -164,15 +164,17 @@ export interface VisionScanResult {
 }
 
 export function evaluateBotVision(params: {
-  bot: Pick<ActorState, 'x' | 'y' | 'z' | 'yaw' | 'crouching' | 'team' | 'blindTimer'>;
+  bot: Pick<ActorState, 'id' | 'x' | 'y' | 'z' | 'yaw' | 'crouching' | 'team' | 'blindTimer'> | Pick<ActorState, 'x' | 'y' | 'z' | 'yaw' | 'crouching' | 'team' | 'blindTimer'>;
   allActors: ReadonlyArray<ActorState>;
   smokes: Array<{ x: number; y: number; z: number; radius: number }>;
   aggroRange: number;
   fovHalfCos: number;
+  isFfa?: boolean;
 }): VisionScanResult | null {
-  const { bot, allActors, smokes, aggroRange, fovHalfCos } = params;
+  const { bot, allActors, smokes, aggroRange, fovHalfCos, isFfa = false } = params;
   if (bot.blindTimer > 0.2) return null;
 
+  const botId = 'id' in bot ? bot.id : '';
   const eyeY = bot.y + (bot.crouching ? 1.08 : 1.55);
   const lookX = -Math.sin(bot.yaw);
   const lookZ = -Math.cos(bot.yaw);
@@ -181,7 +183,8 @@ export function evaluateBotVision(params: {
   let bestScore = Infinity;
 
   for (const other of allActors) {
-    if (!other.alive || other.team === bot.team) continue;
+    if (!other.alive) continue;
+    if (isFfa ? (botId ? other.id === botId : other === bot) : other.team === bot.team) continue;
     const dx = other.x - bot.x;
     const dz = other.z - bot.z;
     const dist = Math.hypot(dx, dz);
@@ -229,8 +232,16 @@ function stepYawTowards(currentYaw: number, targetYaw: number, maxStep: number):
   );
 }
 
-export function performBotBuyPhase(actor: ActorState, index: number): void {
+export function performBotBuyPhase(actor: ActorState, index: number, isAwpOnly = false): void {
   if (!actor.alive || !actor.isBot) return;
+  if (isAwpOnly) {
+    actor.primary = createWeaponInstance('awp');
+    actor.secondary = null;
+    actor.armor = 100;
+    actor.hasHelmet = true;
+    actor.activeSlot = 1;
+    return;
+  }
 
   if (actor.cash >= 2200) {
     const helmetCost = getArmorPurchaseCost(actor, 'kevlar_helmet');
@@ -372,6 +383,8 @@ export function stepBotBrain(params: {
   isBuyPhase: boolean;
   dt: number;
   legacyVision?: boolean;
+  isFfa?: boolean;
+  isAwpOnly?: boolean;
 }): BotActionCommand {
   const {
     bot,
@@ -383,6 +396,8 @@ export function stepBotBrain(params: {
     isBuyPhase,
     dt,
     legacyVision = false,
+    isFfa = false,
+    isAwpOnly = false,
   } = params;
   const tuning = getBotDifficultyTuning(difficulty);
 
@@ -436,7 +451,7 @@ export function stepBotBrain(params: {
     activeSlotNum === 1 ? bot.primary : activeSlotNum === 2 ? bot.secondary : null;
 
   if (activeWeapon && activeWeapon.mag <= 0 && activeWeapon.reserve <= 0) {
-    if (bot.activeSlot === 1 && bot.secondary && bot.secondary.mag > 0) {
+    if (!isAwpOnly && bot.activeSlot === 1 && bot.secondary && bot.secondary.mag > 0) {
       bot.activeSlot = 2;
       brain.reloadTimer = 0;
       brain.reloadingSlot = null;
@@ -476,7 +491,8 @@ export function stepBotBrain(params: {
   if (legacyVision) {
     let bestLegacyDist = Infinity;
     for (const other of allActors) {
-      if (!other.alive || other.team === bot.team) continue;
+      if (!other.alive) continue;
+      if (isFfa ? other.id === bot.id : other.team === bot.team) continue;
       const dist = Math.hypot(other.x - bot.x, other.z - bot.z);
       if (dist > tuning.aggroRange) continue;
       if (
@@ -511,6 +527,7 @@ export function stepBotBrain(params: {
       smokes,
       aggroRange: tuning.aggroRange,
       fovHalfCos: tuning.fovHalfCos,
+      isFfa,
     });
 
     if (visionHit) {
@@ -552,7 +569,25 @@ export function stepBotBrain(params: {
   let wantPlant = false;
   let wantDefuse = false;
 
-  if (bot.team === 'attackers') {
+  if (isFfa || isAwpOnly) {
+    // Roam toward nearest living opponent (or fallback waypoint)
+    let nearestEnemy: ActorState | null = null;
+    let nearestD2 = Infinity;
+    for (const other of allActors) {
+      if (!other.alive) continue;
+      if (isFfa ? other.id === bot.id : other.team === bot.team) continue;
+      const d2 = (other.x - bot.x) ** 2 + (other.z - bot.z) ** 2;
+      if (d2 < nearestD2) {
+        nearestD2 = d2;
+        nearestEnemy = other;
+      }
+    }
+    if (nearestEnemy) {
+      goalId = pickStartWaypointId(nearestEnemy.x, nearestEnemy.z);
+    } else {
+      goalId = 'mid_center';
+    }
+  } else if (bot.team === 'attackers') {
     if (bomb.status === 'planted' && bomb.site) {
       goalId = bomb.site === 'A' ? 'a_site' : 'b_site';
     } else if (bomb.status === 'dropped' && !bot.hasC4) {
@@ -564,12 +599,13 @@ export function stepBotBrain(params: {
       }
       goalId = brain.targetSite === 'A' ? 'a_site' : 'b_site';
     } else {
-      goalId =
+      const preferred =
         brain.lane === 'mid'
           ? 'mid_center'
           : brain.targetSite === 'A'
             ? 'a_site_s'
             : 'b_site_s';
+      goalId = WAYPOINT_MAP.has(preferred) ? preferred : (brain.targetSite === 'A' ? 'a_site' : 'b_site');
     }
   } else {
     if ((bomb.status === 'planted' || bomb.status === 'defusing') && bomb.site) {
@@ -579,12 +615,13 @@ export function stepBotBrain(params: {
         wantDefuse = true;
       }
     } else {
-      goalId =
+      const preferred =
         brain.lane === 'mid'
           ? 'def_mid_entry'
           : brain.targetSite === 'A'
             ? 'a_site_n'
             : 'b_site_n';
+      goalId = WAYPOINT_MAP.has(preferred) ? preferred : (brain.targetSite === 'A' ? 'a_site' : 'b_site');
     }
   }
 

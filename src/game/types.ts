@@ -1,7 +1,14 @@
 export type Team = 'attackers' | 'defenders';
-export type GameMode = 'bots' | 'pvp' | 'mixed' | 'spectate';
+export type GameMode = 'bots' | 'pvp' | 'mixed' | 'spectate' | 'awp' | 'ffa';
 export type BotDifficulty = number; // 1..100 scale (100 = max lethal bots)
-export type MapId = 'sandline' | 'dust2' | 'mirage' | 'inferno' | 'overpass';
+export type MapId =
+  | 'sandline'
+  | 'dust2'
+  | 'mirage'
+  | 'inferno'
+  | 'overpass'
+  | 'awp_arena'
+  | 'custom';
 export type AppScreen = 'title' | 'playing' | 'paused' | 'gameover';
 
 export type WeaponSlot = 1 | 2 | 3 | 4 | 5; // 1=Primary, 2=Secondary, 3=Knife, 4=Grenades, 5=C4
@@ -16,6 +23,74 @@ export type BuyableGearId = WeaponId | ArmorType | 'defuse_kit';
 export type HitboxZone = 'head' | 'chest' | 'limb';
 
 export type RoundPhase = 'buy' | 'live' | 'planted' | 'round_end' | 'match_end';
+
+export type CrosshairShape = 'classic' | 't_shape' | 'circle' | 'dot';
+
+export interface CrosshairConfig {
+  shape: CrosshairShape;
+  size: number; // 2..24 px
+  thickness: number; // 1..6 px
+  gap: number; // 0..18 px
+  outline: number; // 0..3 px
+  opacity: number; // 0.2..1.0
+  color: string; // hex e.g. #6ee7b7
+  dynamic: boolean;
+}
+
+export type CustomSkyTheme = 'desert' | 'twilight' | 'urban' | 'arctic' | 'sunset';
+export type CustomMaterialInput = 'sandstone' | 'concrete' | 'wood' | 'metal' | 'crate';
+export type RampDirection = 'n' | 's' | 'e' | 'w';
+
+export interface CustomMapBlockInput {
+  id?: string;
+  position: [number, number, number];
+  size: [number, number, number];
+  material: CustomMaterialInput;
+  wallbangable?: boolean;
+}
+
+export interface CustomMapRampInput {
+  id?: string;
+  position: [number, number, number];
+  size: [number, number, number];
+  direction: RampDirection;
+  material?: CustomMaterialInput;
+}
+
+export interface CustomMapSpawnInput {
+  position: [number, number, number];
+  yaw?: number;
+}
+
+export interface CustomMapWaypointInput {
+  id: string;
+  position: [number, number];
+  callout?: string;
+  neighbors: string[];
+}
+
+export interface CustomMapJson {
+  mapName: string;
+  skyTheme: CustomSkyTheme;
+  blocks: CustomMapBlockInput[];
+  ramps?: CustomMapRampInput[];
+  attackerSpawns: CustomMapSpawnInput[];
+  defenderSpawns: CustomMapSpawnInput[];
+  ffaSpawns?: CustomMapSpawnInput[];
+  bombSites: {
+    A: { position: [number, number]; radius?: number };
+    B: { position: [number, number]; radius?: number };
+  };
+  botWaypoints?: CustomMapWaypointInput[];
+}
+
+export interface LoadoutSnapshot {
+  primaryId: PrimaryWeaponId | null;
+  secondaryId: SecondaryWeaponId | null;
+  armor: ArmorType;
+  hasDefuseKit: boolean;
+  grenades: GrenadeId[];
+}
 
 export interface WeaponSpec {
   id: WeaponId;
@@ -88,6 +163,8 @@ export interface ActorState {
   blindTimer: number; // seconds remaining of flashbang blindness
   inBuyZone: boolean;
   hurtFlash: number;
+  respawnTimer?: number;
+  spawnProtectionTimer?: number;
 }
 
 export interface BombState {
@@ -110,6 +187,7 @@ export interface KillFeedEntry {
   victimName: string;
   victimTeam: Team;
   weaponName: string;
+  weaponId?: WeaponId;
   headshot: boolean;
   wallbang: boolean;
   timestamp: number;
@@ -148,6 +226,7 @@ export interface HudSnapshot {
   screen: AppScreen;
   mode: GameMode;
   mapId: MapId;
+  customMapName?: string | null;
   roundNumber: number;
   maxRounds: number;
   halftimeRound: number;
@@ -185,6 +264,12 @@ export interface HudSnapshot {
   hasDefuseKit: boolean;
   bomb: BombState;
   crosshairSpread: number; // pixels radius
+  bhopStreak: number;
+  speedUnits: number;
+  spawnProtectionRemaining: number;
+  respawnTimerRemaining: number;
+  ffaTargetKills: number;
+  hasPreviousLoadout: boolean;
   blindAlpha: number; // 0..1
   damageFlash: number; // 0..1
   hitmarker: 'none' | 'body' | 'head';
@@ -232,13 +317,15 @@ export interface RoomPlayerInfo {
   name: string;
   team: Team;
   isHost: boolean;
+  connected?: boolean;
 }
 
 export interface RoomInfo {
   id: string;
   hostId: string;
-  mode: 'pvp' | 'mixed';
+  mode: 'pvp' | 'mixed' | 'awp' | 'ffa';
   mapId: MapId;
+  customMapData?: CustomMapJson | null;
   botDifficulty: BotDifficulty;
   started: boolean;
   players: RoomPlayerInfo[];

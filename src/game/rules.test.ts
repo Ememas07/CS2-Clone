@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   calculateBulletDamage,
+  calculateC4DetonationDamage,
   calculateHeExplosionDamage,
   canBuyWeapon,
   canPickUpGrenade,
@@ -16,8 +17,20 @@ import {
   getKillReward,
   isHalftimeRound,
   selectDeathDrops,
+  selectFarthestFfaSpawn,
 } from './rules';
 import { getBotDifficultyTuning } from './botAI';
+import { parseCrosshairJson, DEFAULT_CROSSHAIR } from './crosshair';
+import {
+  createCustomMapTemplate,
+  customMapToDefinition,
+  validateCustomMapJson,
+} from './customMaps';
+import {
+  BHOP_MAX_MULT,
+  createKrunkerMoveState,
+  stepKrunkerMovement,
+} from './movement';
 import {
   findWaypointPath,
   getSpawnAnchor,
@@ -502,5 +515,213 @@ test('bots: tactical FOV vision rejects enemies behind bot while legacyVision pr
   });
   assert.equal(legacyCmd.wantFire, true, 'Legacy bots keep 360-deg instant detection');
 });
+
+test('movement: chained bhop preserves momentum within 150ms grace and caps at 2.2x, mid-air crouch fast-falls', () => {
+  const flatGroundCollider = (x: number, y: number, z: number, _vy: number) => ({
+    x,
+    y: y <= 0 ? 0 : y,
+    z,
+    grounded: y <= 0.001,
+    groundY: 0,
+  });
+
+  const baseSpeed = 6.5;
+  const state = createKrunkerMoveState(0, 0, 0);
+
+  // Build initial running speed on ground
+  for (let i = 0; i < 15; i++) {
+    stepKrunkerMovement(
+      state,
+      {
+        yaw: 0,
+        wishFwd: 1,
+        wishStrafe: 0,
+        jumpHeld: false,
+        crouchHeld: false,
+        walkHeld: false,
+        baseRunSpeed: baseSpeed,
+        scopeZoom: 0,
+        isFrozen: false,
+        radius: 0.42,
+      },
+      flatGroundCollider,
+      0.016
+    );
+  }
+
+  // Chain several bhops by re-pressing jump inside 150ms grace upon landing
+  let maxMultSeen = 1;
+  for (let chain = 0; chain < 10; chain++) {
+    // Trigger jump edge
+    const jEv = stepKrunkerMovement(
+      state,
+      {
+        yaw: 0,
+        wishFwd: 1,
+        wishStrafe: 0,
+        jumpHeld: true,
+        crouchHeld: false,
+        walkHeld: false,
+        baseRunSpeed: baseSpeed,
+        scopeZoom: 0,
+        isFrozen: false,
+        radius: 0.42,
+      },
+      flatGroundCollider,
+      0.016
+    );
+    assert.equal(jEv.jumped, true);
+
+    // Release jump in air and simulate until landing
+    let landed = false;
+    for (let t = 0; t < 100; t++) {
+      const ev = stepKrunkerMovement(
+        state,
+        {
+          yaw: 0,
+          wishFwd: 1,
+          wishStrafe: 0,
+          jumpHeld: false,
+          crouchHeld: false,
+          walkHeld: false,
+          baseRunSpeed: baseSpeed,
+          scopeZoom: 0,
+          isFrozen: false,
+          radius: 0.42,
+        },
+        flatGroundCollider,
+        0.016
+      );
+      maxMultSeen = Math.max(maxMultSeen, ev.speedMult);
+      if (ev.landed) {
+        landed = true;
+        break;
+      }
+    }
+    assert.equal(landed, true, `chain ${chain} must land`);
+    assert.ok(state.landingGraceTimer > 0.1, 'landing sets 150ms grace window');
+  }
+
+  assert.ok(state.bhopStreak >= 5, `expected chained bhop streak >= 5, got ${state.bhopStreak}`);
+  assert.ok(maxMultSeen > 1.35 && maxMultSeen <= BHOP_MAX_MULT + 1e-6, `speed multiplier ${maxMultSeen} within cap`);
+
+  // Waiting past 150ms resets bhop streak
+  for (let w = 0; w < 15; w++) {
+    stepKrunkerMovement(
+      state,
+      {
+        yaw: 0,
+        wishFwd: 1,
+        wishStrafe: 0,
+        jumpHeld: false,
+        crouchHeld: false,
+        walkHeld: false,
+        baseRunSpeed: baseSpeed,
+        scopeZoom: 0,
+        isFrozen: false,
+        radius: 0.42,
+      },
+      flatGroundCollider,
+      0.02
+    );
+  }
+  assert.equal(state.bhopStreak, 0, 'waiting >150ms clears bhop streak');
+
+  // Mid-air crouch fast-fall descends faster than uncrouched fall
+  const normalAir = createKrunkerMoveState(0, 5, 0);
+  normalAir.grounded = false;
+  const crouchAir = createKrunkerMoveState(0, 5, 0);
+  crouchAir.grounded = false;
+  for (let i = 0; i < 10; i++) {
+    stepKrunkerMovement(
+      normalAir,
+      { yaw: 0, wishFwd: 0, wishStrafe: 0, jumpHeld: false, crouchHeld: false, walkHeld: false, baseRunSpeed: 6.5, scopeZoom: 0, isFrozen: false, radius: 0.42 },
+      flatGroundCollider,
+      0.016
+    );
+    stepKrunkerMovement(
+      crouchAir,
+      { yaw: 0, wishFwd: 0, wishStrafe: 0, jumpHeld: false, crouchHeld: true, walkHeld: false, baseRunSpeed: 6.5, scopeZoom: 0, isFrozen: false, radius: 0.42 },
+      flatGroundCollider,
+      0.016
+    );
+  }
+  assert.ok(crouchAir.y < normalAir.y && crouchAir.vy < normalAir.vy, 'mid-air crouch accelerates fast-fall');
+});
+
+test('custom maps: template validates cleanly, builds ramps & colliders, and rejects invalid schemas', () => {
+  const tpl = createCustomMapTemplate();
+  const valid = validateCustomMapJson(tpl);
+  assert.equal(valid.ok, true);
+  if (valid.ok) {
+    const def = customMapToDefinition(valid.data);
+    assert.equal(def.id, 'custom');
+    assert.equal(def.name, tpl.mapName);
+    assert.ok(def.boxes.some((b) => b.hiddenVisual === true), 'ramps subdivide into hiddenVisual walkable step colliders');
+    assert.ok((def.ffaSpawns?.length ?? 0) >= 6);
+    assert.ok(def.waypoints.length >= 5);
+  }
+
+  const invalidNoBlocks = validateCustomMapJson({ ...tpl, blocks: [] });
+  assert.equal(invalidNoBlocks.ok, false);
+
+  const invalidTheme = validateCustomMapJson({ ...tpl, skyTheme: 'lava_world' });
+  assert.equal(invalidTheme.ok, false);
+
+  const invalidBlockTuple = validateCustomMapJson({
+    ...tpl,
+    blocks: [{ position: [0, 0], size: [2, 2, 2], material: 'crate' }],
+  });
+  assert.equal(invalidBlockTuple.ok, false);
+});
+
+test('crosshair: clamps extreme parameters and falls back cleanly on corrupt JSON', () => {
+  const parsed = parseCrosshairJson(
+    JSON.stringify({
+      shape: 't_shape',
+      size: 999,
+      thickness: -5,
+      gap: 40,
+      outline: 9,
+      opacity: 0.01,
+      color: '#22D3EE',
+      dynamic: false,
+    })
+  );
+  assert.equal(parsed.shape, 't_shape');
+  assert.equal(parsed.size, 24);
+  assert.equal(parsed.thickness, 1);
+  assert.equal(parsed.gap, 18);
+  assert.equal(parsed.outline, 3);
+  assert.equal(parsed.opacity, 0.2);
+  assert.equal(parsed.color, '#22d3ee');
+  assert.equal(parsed.dynamic, false);
+
+  const fallback = parseCrosshairJson('{bad json');
+  assert.deepEqual(fallback, DEFAULT_CROSSHAIR);
+});
+
+test('c4 detonation & ffa spawn selection: blast falloff and farthest spawn safety', () => {
+  const close = calculateC4DetonationDamage(4, 100);
+  const mid = calculateC4DetonationDamage(24, 100);
+  const far = calculateC4DetonationDamage(38, 100);
+
+  assert.ok(close.hpDamage >= 120, 'inner C4 radius is lethal');
+  assert.ok(mid.hpDamage > 0 && mid.hpDamage < close.hpDamage, 'mid C4 radius deals attenuated damage');
+  assert.equal(far.hpDamage, 0, 'far radius is safe');
+
+  const spawns = [
+    { x: 0, y: 0, z: 0 },
+    { x: 30, y: 0, z: 30 },
+    { x: -30, y: 0, z: -30 },
+  ];
+  const chosen = selectFarthestFfaSpawn(spawns, [
+    { x: 2, z: 2 },
+    { x: 28, z: 25 },
+  ]);
+  assert.equal(chosen.x, -30);
+  assert.equal(chosen.z, -30);
+});
+
 
 

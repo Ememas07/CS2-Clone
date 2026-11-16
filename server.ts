@@ -102,11 +102,12 @@ interface ClientMeta {
 interface RoomState {
   id: string;
   hostId: string;
-  mode: 'pvp' | 'mixed';
-  mapId: 'sandline' | 'dust2' | 'mirage' | 'inferno' | 'overpass';
+  mode: 'pvp' | 'mixed' | 'awp' | 'ffa';
+  mapId: 'sandline' | 'dust2' | 'mirage' | 'inferno' | 'overpass' | 'awp_arena' | 'custom';
   botDifficulty: number;
   clients: Map<string, ClientMeta>;
   started: boolean;
+  customMapData?: unknown;
 }
 
 const PORT = Number(process.env.PORT || 3000);
@@ -155,6 +156,7 @@ function serializeRoom(room: RoomState) {
     mapId: room.mapId,
     botDifficulty: room.botDifficulty,
     started: room.started,
+    customMapData: room.customMapData,
     players: Array.from(room.clients.values()).map((c) => ({
       id: c.id,
       name: c.name,
@@ -181,16 +183,19 @@ function leaveCurrentRoom(meta: ClientMeta): void {
     return;
   }
 
+  let migrated = false;
   if (room.hostId === meta.id) {
     const nextHost = room.clients.values().next().value as ClientMeta | undefined;
     if (nextHost) {
       room.hostId = nextHost.id;
+      migrated = true;
     }
   }
 
   broadcastRoom(room, {
     type: 'room_update',
     room: serializeRoom(room),
+    hostMigrated: migrated,
   });
 }
 
@@ -377,14 +382,33 @@ async function startServer(): Promise<void> {
         meta.team = msg.team === 'defenders' ? 'defenders' : 'attackers';
         meta.roomId = roomId;
 
-        const validMaps = new Set(['sandline', 'dust2', 'mirage', 'inferno', 'overpass']);
+        const validMaps = new Set([
+          'sandline',
+          'dust2',
+          'mirage',
+          'inferno',
+          'overpass',
+          'awp_arena',
+          'custom',
+        ]);
         const rawMap = String(msg.mapId || 'sandline');
         const mapId = (validMaps.has(rawMap) ? rawMap : 'sandline') as RoomState['mapId'];
+        const rawMode = String(msg.mode || 'pvp');
+        const mode: RoomState['mode'] =
+          rawMode === 'mixed' || rawMode === 'awp' || rawMode === 'ffa' ? rawMode : 'pvp';
+
+        let safeCustomMap: unknown = undefined;
+        if (mapId === 'custom' && msg.customMapData && typeof msg.customMapData === 'object') {
+          const serialized = JSON.stringify(msg.customMapData);
+          if (serialized.length <= 200_000) {
+            safeCustomMap = msg.customMapData;
+          }
+        }
 
         const room: RoomState = {
           id: roomId,
           hostId: meta.id,
-          mode: msg.mode === 'mixed' ? 'mixed' : 'pvp',
+          mode,
           mapId,
           botDifficulty:
             msg.botDifficulty === 'easy'
@@ -399,6 +423,7 @@ async function startServer(): Promise<void> {
                     ),
           clients: new Map([[meta.id, meta]]),
           started: false,
+          customMapData: safeCustomMap,
         };
         rooms.set(roomId, room);
         sendJson(ws, {

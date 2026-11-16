@@ -1,10 +1,12 @@
 import { useEffect, useRef } from 'react';
-import { MAPS } from '../game/mapData';
-import type { HudSnapshot, WeaponSlot } from '../game/types';
+import { ACTIVE_MAP, MAPS } from '../game/mapData';
+import type { CrosshairConfig, HudSnapshot, WeaponSlot } from '../game/types';
 import { WEAPONS } from '../game/weapons';
+import { CrosshairPreviewSvg } from './CrosshairCustomizer';
 
 interface TacticalHUDProps {
   hud: HudSnapshot;
+  crosshairConfig: CrosshairConfig;
   showScoreboard: boolean;
   buyMenuOpen: boolean;
   onOpenBuyMenu: () => void;
@@ -24,6 +26,7 @@ function formatTimer(seconds: number): string {
 
 export function TacticalHUD({
   hud,
+  crosshairConfig,
   showScoreboard,
   buyMenuOpen,
   onOpenBuyMenu,
@@ -42,7 +45,7 @@ export function TacticalHUD({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const mapDef = MAPS[hud.mapId] ?? MAPS.sandline;
+    const mapDef = hud.mapId === 'custom' ? ACTIVE_MAP : (MAPS[hud.mapId] ?? MAPS.sandline);
     const bounds = mapDef.bounds;
 
     const w = canvas.width;
@@ -117,9 +120,13 @@ export function TacticalHUD({
     ctx.fill();
 
     // Bomb icon: Attackers always know dropped/planted C4 location; Defenders only see it when right next to it
+    const isFfa = hud.mode === 'ffa';
+    const isAwp = hud.mode === 'awp';
     const canSeeBombOnRadar =
-      hud.localTeam === 'attackers' ||
-      Math.hypot(hud.bomb.x - hud.localX, hud.bomb.z - hud.localZ) < 6;
+      !isFfa &&
+      !isAwp &&
+      (hud.localTeam === 'attackers' ||
+        Math.hypot(hud.bomb.x - hud.localX, hud.bomb.z - hud.localZ) < 6);
     if (
       canSeeBombOnRadar &&
       (hud.bomb.status === 'dropped' ||
@@ -137,8 +144,8 @@ export function TacticalHUD({
     // Player blips
     for (const blip of hud.radarBlips) {
       if (!blip.alive) continue;
-      const isAlly = blip.team === hud.localTeam;
-      if (!isAlly && !blip.spotted) continue;
+      const isAlly = !isFfa && blip.team === hud.localTeam;
+      if (!blip.isLocal && !isAlly && !blip.spotted) continue;
 
       const [px, py] = toRadar(blip.x, blip.z);
       ctx.beginPath();
@@ -160,9 +167,26 @@ export function TacticalHUD({
         ctx.fillRect(px + 3, py - 5, 4, 4);
       }
     }
-  }, [hud.bomb, hud.localTeam, hud.localX, hud.localYaw, hud.localZ, hud.mapId, hud.radarBlips]);
+  }, [
+    hud.bomb,
+    hud.customMapName,
+    hud.localTeam,
+    hud.localX,
+    hud.localYaw,
+    hud.localZ,
+    hud.mapId,
+    hud.mode,
+    hud.radarBlips,
+  ]);
 
-  const spreadRadiusPx = Math.max(2, Math.round(hud.crosshairSpread));
+  const spreadRadiusPx = Math.max(1, Math.round(hud.crosshairSpread));
+  const isFfa = hud.mode === 'ffa';
+  const ffaSorted = isFfa
+    ? [...hud.scoreboard].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths)
+    : [];
+  const ffaLocalEntry = isFfa ? hud.scoreboard.find((p) => p.isLocal) : undefined;
+  const ffaLeader = isFfa ? ffaSorted[0] : undefined;
+
   const isGun = hud.activeSlot === 1 || hud.activeSlot === 2;
   const spec = WEAPONS[hud.activeWeaponId];
   const canBuyNow = hud.canBuy && hud.localAlive;
@@ -266,35 +290,14 @@ export function TacticalHUD({
         </div>
       )}
 
-      {/* Dynamic Crosshair: exact bullet-cone pixel radius */}
+      {/* Customizable SVG Crosshair: supports Dynamic Spread */}
       {hud.scopeZoom === 0 && (hud.localAlive || Boolean(hud.spectatingName)) && !buyMenuOpen && (
-        <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
-          {spreadRadiusPx > 5 && (
-            <div
-              className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-emerald-300/25"
-              style={{
-                width: `${spreadRadiusPx * 2}px`,
-                height: `${spreadRadiusPx * 2}px`,
-              }}
-            />
-          )}
-          <div
-            className="absolute left-1/2 -translate-x-1/2 w-[2px] h-[9px] bg-emerald-300 shadow-[0_0_2px_#000]"
-            style={{ bottom: `${spreadRadiusPx}px` }}
+        <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none flex items-center justify-center">
+          <CrosshairPreviewSvg
+            config={crosshairConfig}
+            spreadPx={Math.max(0, spreadRadiusPx - 2)}
+            viewportCenter
           />
-          <div
-            className="absolute left-1/2 -translate-x-1/2 w-[2px] h-[9px] bg-emerald-300 shadow-[0_0_2px_#000]"
-            style={{ top: `${spreadRadiusPx}px` }}
-          />
-          <div
-            className="absolute top-1/2 -translate-y-1/2 h-[2px] w-[9px] bg-emerald-300 shadow-[0_0_2px_#000]"
-            style={{ right: `${spreadRadiusPx}px` }}
-          />
-          <div
-            className="absolute top-1/2 -translate-y-1/2 h-[2px] w-[9px] bg-emerald-300 shadow-[0_0_2px_#000]"
-            style={{ left: `${spreadRadiusPx}px` }}
-          />
-          <div className="w-[2px] h-[2px] bg-emerald-300" />
         </div>
       )}
 
@@ -318,13 +321,13 @@ export function TacticalHUD({
       {hud.killConfirm && (
         <div
           key={hud.killConfirm.id}
-          className="fixed left-1/2 bottom-44 -translate-x-1/2 pointer-events-none flex items-center gap-2.5 px-4 py-1.5 rounded bg-[#0b0e14]/92 border shadow-xl animate-pulse"
+          className="fixed left-1/2 bottom-44 -translate-x-1/2 pointer-events-none flex items-center gap-2.5 px-4 py-1.5 rounded bg-[#0b0e14]/92 border shadow-xl"
           style={{
             borderColor: hud.killConfirm.headshot ? 'rgba(244,63,94,0.85)' : 'rgba(245,158,11,0.75)',
           }}
         >
           <span
-            className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[11px] font-black ${
+            className={`inline-flex items-center justify-center w-5 h-5 rounded-sm text-[11px] font-black ${
               hud.killConfirm.headshot
                 ? 'bg-rose-500 text-white'
                 : 'bg-amber-400 text-slate-950'
@@ -336,9 +339,11 @@ export function TacticalHUD({
             {hud.killConfirm.headshot ? 'Headshot Elimination' : 'Eliminated'}{' '}
             <span className="text-amber-300">{hud.killConfirm.victimName}</span>
           </div>
-          <span className="text-xs font-tactical-mono font-bold text-emerald-400">
-            +${hud.killConfirm.reward}
-          </span>
+          {!isFfa && hud.mode !== 'awp' && (
+            <span className="text-xs font-tactical-mono font-bold text-emerald-400">
+              +${hud.killConfirm.reward}
+            </span>
+          )}
         </div>
       )}
 
@@ -354,76 +359,108 @@ export function TacticalHUD({
             className="block rounded-sm"
           />
           <div className="flex items-center justify-between text-[11px] font-tactical-mono text-slate-300 px-1 pt-1">
-            <span>RADAR</span>
+            <span>{hud.customMapName ? hud.customMapName.slice(0, 12) : 'RADAR'}</span>
             <span className={hud.inBuyZone ? 'text-emerald-400' : 'text-slate-400'}>
-              {hud.inBuyZone ? 'BUY ZONE' : hud.localTeam === 'attackers' ? 'ATK' : 'DEF'}
+              {isFfa ? 'FFA' : hud.inBuyZone ? 'BUY ZONE' : hud.localTeam === 'attackers' ? 'ATK' : 'DEF'}
             </span>
           </div>
         </div>
 
-        {/* Top-Center: Competitive Scoreline & Round Timer */}
+        {/* Top-Center: Competitive Scoreline / FFA Header & Match Timer */}
         <div className="flex flex-col items-center">
-          <div className="flex items-center bg-[#0b0e14]/90 border border-white/15 rounded overflow-hidden shadow-lg">
-            {/* Attackers Score + Alive Pips */}
-            <div className="flex items-center gap-2.5 px-3.5 py-1.5 border-r border-white/10">
-              <div className="flex gap-1">
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <span
-                    key={i}
-                    className={`w-1.5 h-3.5 rounded-xs ${
-                      i < hud.attackersAlive ? 'bg-amber-400' : 'bg-white/15'
-                    }`}
-                  />
-                ))}
-              </div>
-              <span className="text-xl font-bold tabular-nums text-amber-400">
-                {hud.attackerScore}
-              </span>
-            </div>
-
-            {/* Timer */}
-            <div className="px-4 py-1 text-center min-w-[96px]">
-              {hud.phase === 'planted' ? (
-                <div className="text-rose-400 font-bold tabular-nums text-lg leading-tight">
-                  C4 {formatTimer(hud.bomb.timerRemaining)}
+          {isFfa ? (
+            <div className="flex items-center bg-[#0b0e14]/90 border border-white/15 rounded overflow-hidden shadow-lg">
+              <div className="px-3.5 py-1.5 border-r border-white/10 text-left">
+                <div className="text-[10px] uppercase tracking-wider text-slate-400">Your Kills</div>
+                <div className="text-lg font-bold tabular-nums text-amber-400 leading-tight">
+                  {ffaLocalEntry?.kills ?? 0} / {hud.ffaTargetKills}
                 </div>
-              ) : (
-                <div
-                  className={`font-bold tabular-nums text-xl leading-tight ${
-                    hud.phase === 'buy'
-                      ? 'text-emerald-400'
-                      : hud.phaseTimeRemaining <= 15
-                        ? 'text-rose-400'
-                        : 'text-slate-50'
-                  }`}
-                >
+              </div>
+              <div className="px-4 py-1 text-center min-w-[96px]">
+                <div className="font-bold tabular-nums text-xl leading-tight text-slate-50">
                   {formatTimer(hud.phaseTimeRemaining)}
                 </div>
-              )}
-              <div className="text-[10px] uppercase tracking-wider text-slate-400">
-                R{hud.roundNumber}/{hud.maxRounds} ·{' '}
-                {hud.phase === 'buy' ? 'BUY' : hud.phase === 'planted' ? 'PLANTED' : 'LIVE'}
-                {hud.pingMs !== undefined && hud.pingMs > 0 && ` · ${hud.pingMs}ms`}
+                <div className="text-[10px] uppercase tracking-wider text-amber-300">
+                  FREE-FOR-ALL
+                  {hud.pingMs !== undefined && hud.pingMs > 0 && ` · ${hud.pingMs}ms`}
+                </div>
+              </div>
+              <div className="px-3.5 py-1.5 border-l border-white/10 text-right">
+                <div className="text-[10px] uppercase tracking-wider text-slate-400">Leader</div>
+                <div className="text-sm font-bold tabular-nums text-sky-300 leading-tight">
+                  {ffaLeader ? `${ffaLeader.name} (${ffaLeader.kills})` : '—'}
+                </div>
               </div>
             </div>
+          ) : (
+            <div className="flex items-center bg-[#0b0e14]/90 border border-white/15 rounded overflow-hidden shadow-lg">
+              {/* Attackers Score + Alive Pips */}
+              <div className="flex items-center gap-2.5 px-3.5 py-1.5 border-r border-white/10">
+                <div className="flex gap-1">
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <span
+                      key={i}
+                      className={`w-1.5 h-3.5 rounded-xs ${
+                        i < hud.attackersAlive ? 'bg-amber-400' : 'bg-white/15'
+                      }`}
+                    />
+                  ))}
+                </div>
+                <span className="text-xl font-bold tabular-nums text-amber-400">
+                  {hud.attackerScore}
+                </span>
+              </div>
 
-            {/* Defenders Score + Alive Pips */}
-            <div className="flex items-center gap-2.5 px-3.5 py-1.5 border-l border-white/10">
-              <span className="text-xl font-bold tabular-nums text-sky-400">
-                {hud.defenderScore}
-              </span>
-              <div className="flex gap-1">
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <span
-                    key={i}
-                    className={`w-1.5 h-3.5 rounded-xs ${
-                      i < hud.defendersAlive ? 'bg-sky-400' : 'bg-white/15'
+              {/* Timer */}
+              <div className="px-4 py-1 text-center min-w-[96px]">
+                {hud.phase === 'planted' ? (
+                  <div className="text-rose-400 font-bold tabular-nums text-lg leading-tight">
+                    C4 {formatTimer(hud.bomb.timerRemaining)}
+                  </div>
+                ) : (
+                  <div
+                    className={`font-bold tabular-nums text-xl leading-tight ${
+                      hud.phase === 'buy'
+                        ? 'text-emerald-400'
+                        : hud.phaseTimeRemaining <= 15
+                          ? 'text-rose-400'
+                          : 'text-slate-50'
                     }`}
-                  />
-                ))}
+                  >
+                    {formatTimer(hud.phaseTimeRemaining)}
+                  </div>
+                )}
+                <div className="text-[10px] uppercase tracking-wider text-slate-400">
+                  R{hud.roundNumber}/{hud.maxRounds} ·{' '}
+                  {hud.mode === 'awp'
+                    ? 'AWP ONLY'
+                    : hud.phase === 'buy'
+                      ? 'BUY'
+                      : hud.phase === 'planted'
+                        ? 'PLANTED'
+                        : 'LIVE'}
+                  {hud.pingMs !== undefined && hud.pingMs > 0 && ` · ${hud.pingMs}ms`}
+                </div>
+              </div>
+
+              {/* Defenders Score + Alive Pips */}
+              <div className="flex items-center gap-2.5 px-3.5 py-1.5 border-l border-white/10">
+                <span className="text-xl font-bold tabular-nums text-sky-400">
+                  {hud.defenderScore}
+                </span>
+                <div className="flex gap-1">
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <span
+                      key={i}
+                      className={`w-1.5 h-3.5 rounded-xs ${
+                        i < hud.defendersAlive ? 'bg-sky-400' : 'bg-white/15'
+                      }`}
+                    />
+                  ))}
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
           {/* Round Banner */}
           {hud.roundBanner && (
@@ -436,15 +473,6 @@ export function TacticalHUD({
         {/* Top-Right: Mute / Pause + Kill Feed */}
         <div className="flex flex-col items-end gap-2 min-w-[240px]">
           <div className="flex items-center gap-1.5 pointer-events-auto" data-ui-interactive="true">
-            <a
-              href="/"
-              title="Return to Hub"
-              aria-label="Return to Hub"
-              className="px-2.5 py-1 text-xs font-semibold bg-[#0b0e14]/88 hover:bg-slate-800 text-amber-400 border border-white/15 rounded flex items-center gap-1 cursor-pointer transition-colors"
-            >
-              <span>←</span>
-              <span>Hub</span>
-            </a>
             {hud.mode === 'spectate' && (
               <button
                 type="button"
@@ -588,10 +616,16 @@ export function TacticalHUD({
           </div>
         )}
 
+        {hud.localAlive && hud.spawnProtectionRemaining > 0 && (
+          <div className="px-3.5 py-1 bg-[#0b0e14]/90 border border-sky-400/50 rounded text-xs font-bold uppercase tracking-wider text-sky-300">
+            Spawn Protection {hud.spawnProtectionRemaining.toFixed(1)}s
+          </div>
+        )}
+
         {!hud.localAlive && (
           <div className="flex flex-col items-center gap-2">
             {hud.deathInfo && (
-              <div className="px-5 py-2.5 bg-[#0b0e14]/95 border border-rose-500/60 rounded-md text-center shadow-xl backdrop-blur-sm">
+              <div className="px-5 py-2.5 bg-[#0b0e14]/95 border border-rose-500/60 rounded-md text-center shadow-xl">
                 <div className="text-[10px] font-bold uppercase tracking-widest text-rose-400">
                   Eliminated In Action
                 </div>
@@ -618,18 +652,24 @@ export function TacticalHUD({
                   hud.mode === 'spectate' ? 'text-amber-300' : 'text-rose-300'
                 }`}
               >
-                {hud.mode === 'spectate'
-                  ? hud.spectatingName
-                    ? `Spectating 5v5 Bots: ${hud.spectatingName} (${
-                        hud.spectatingTeam === 'attackers' ? 'ATK' : 'DEF'
-                      })`
-                    : 'Spectating 5v5 Bots — Free Camera'
-                  : hud.spectatingName
-                    ? `Spectating Ally: ${hud.spectatingName}`
-                    : 'Free Death Camera'}
+                {isFfa
+                  ? `Respawning in ${Math.max(0.1, hud.respawnTimerRemaining).toFixed(1)}s...`
+                  : hud.mode === 'spectate'
+                    ? hud.spectatingName
+                      ? `Spectating 5v5 Bots: ${hud.spectatingName} (${
+                          hud.spectatingTeam === 'attackers' ? 'ATK' : 'DEF'
+                        })`
+                      : 'Spectating 5v5 Bots — Free Camera'
+                    : hud.spectatingName
+                      ? `Spectating Ally: ${hud.spectatingName}`
+                      : 'Free Death Camera'}
               </div>
               <div className="text-[11px] text-slate-300 mt-0.5">
-                {hud.spectatingName ? 'LMB / Space Next Ally · RMB Prev' : 'Mouse to orbit view'}
+                {isFfa
+                  ? 'Mouse to orbit view while respawning'
+                  : hud.spectatingName
+                    ? 'LMB / Space Next Ally · RMB Prev'
+                    : 'Mouse to orbit view'}
                 {hud.spectatingCanControl && (
                   <span className="text-amber-300 font-semibold"> · [E] Take Control</span>
                 )}
@@ -641,15 +681,28 @@ export function TacticalHUD({
 
         {hud.localAlive && !hud.pointerLocked && !buyMenuOpen && !showScoreboard && (
           <div className="px-3.5 py-1 bg-[#0b0e14]/82 border border-white/15 rounded text-[11px] text-slate-300">
-            Click viewport to lock mouse aim · B Buy · Esc Pause
+            Click viewport to lock mouse aim ·{' '}
+            {hud.mode === 'awp' || isFfa ? 'F Inspect · Esc Pause' : 'B Buy · Esc Pause'}
           </div>
         )}
       </div>
 
-      {/* Bottom Row: HP / Armor / Cash (Left) | Ammo & 4-Slot + C4 Inventory (Right) */}
+      {/* Bottom Row: HP / Armor / Cash + Bhop Speed (Left) | Ammo & Inventory (Right) */}
       <div className="fixed bottom-4 left-4 right-4 flex items-end justify-between gap-4">
         {/* Bottom-Left: Vitals & Economy */}
         <div className="flex flex-col gap-2">
+          {(hud.bhopStreak > 0 || hud.speedUnits >= 285) && hud.localAlive && (
+            <div className="self-start flex items-center gap-2.5 px-3 py-1 bg-[#0b0e14]/88 border border-amber-400/40 rounded text-xs font-tactical-mono shadow">
+              <span className="text-amber-300 font-bold tabular-nums">
+                {hud.speedUnits} u/s
+              </span>
+              {hud.bhopStreak > 0 && (
+                <span className="text-emerald-400 font-bold">
+                  BHOP x{hud.bhopStreak}
+                </span>
+              )}
+            </div>
+          )}
           {canBuyNow && (
             <button
               type="button"
@@ -697,11 +750,21 @@ export function TacticalHUD({
               )}
             </div>
 
-            {/* Cash */}
+            {/* Cash or Mode Goal */}
             <div className="border-l border-white/10 pl-4">
-              <span className="text-xl font-bold tabular-nums text-emerald-400 leading-none">
-                ${hud.cash.toLocaleString()}
-              </span>
+              {isFfa ? (
+                <span className="text-sm font-bold font-tactical-mono text-amber-300 leading-none">
+                  {ffaLocalEntry?.kills ?? 0} / {hud.ffaTargetKills} KILLS
+                </span>
+              ) : hud.mode === 'awp' ? (
+                <span className="text-sm font-bold font-tactical-mono text-sky-300 leading-none">
+                  AWP ARENA
+                </span>
+              ) : (
+                <span className="text-xl font-bold tabular-nums text-emerald-400 leading-none">
+                  ${hud.cash.toLocaleString()}
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -840,69 +903,108 @@ export function TacticalHUD({
             <div className="flex items-center justify-between border-b border-white/10 pb-3 mb-4">
               <div>
                 <h2 className="text-lg font-bold uppercase tracking-wider text-white">
-                  Match Scoreboard
+                  {isFfa ? 'Free-For-All Leaderboard' : 'Match Scoreboard'}
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Round {hud.roundNumber} of {hud.maxRounds} · Halftime swap after Round{' '}
-                  {hud.halftimeRound - 1}
+                  {isFfa
+                    ? `First to ${hud.ffaTargetKills} Kills · ${formatTimer(hud.phaseTimeRemaining)} remaining`
+                    : `Round ${hud.roundNumber} of ${hud.maxRounds} · Halftime swap after Round ${
+                        hud.halftimeRound - 1
+                      }`}
                 </p>
               </div>
-              <div className="flex items-center gap-4 text-lg font-bold tabular-nums">
-                <span className="text-amber-400">ATK {hud.attackerScore}</span>
-                <span className="text-slate-500">:</span>
-                <span className="text-sky-400">{hud.defenderScore} DEF</span>
-              </div>
+              {!isFfa && (
+                <div className="flex items-center gap-4 text-lg font-bold tabular-nums">
+                  <span className="text-amber-400">ATK {hud.attackerScore}</span>
+                  <span className="text-slate-500">:</span>
+                  <span className="text-sky-400">{hud.defenderScore} DEF</span>
+                </div>
+              )}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {(['attackers', 'defenders'] as const).map((team) => {
-                const members = hud.scoreboard
-                  .filter((p) => p.team === team)
-                  .sort((a, b) => b.kills - a.kills);
-                return (
-                  <div key={team} className="bg-[#0b0e14] border border-white/10 rounded p-3">
-                    <div
-                      className={`text-xs font-bold uppercase tracking-wider mb-2 ${
-                        team === 'attackers' ? 'text-amber-400' : 'text-sky-400'
-                      }`}
-                    >
-                      {team === 'attackers' ? 'Attackers' : 'Defenders'}
-                    </div>
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="text-slate-400 border-b border-white/10">
-                          <th className="text-left py-1">Player</th>
-                          <th className="text-right py-1">K</th>
-                          <th className="text-right py-1">D</th>
-                          <th className="text-right py-1">HS</th>
-                          <th className="text-right py-1">Cash</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {members.map((m) => (
-                          <tr
-                            key={m.id}
-                            className={`border-b border-white/5 last:border-0 ${
-                              m.isLocal ? 'text-amber-200 font-semibold' : 'text-slate-200'
-                            } ${!m.alive ? 'opacity-50' : ''}`}
-                          >
-                            <td className="py-1.5">
-                              {m.name} {!m.alive ? '(Dead)' : ''}
-                            </td>
-                            <td className="text-right tabular-nums">{m.kills}</td>
-                            <td className="text-right tabular-nums">{m.deaths}</td>
-                            <td className="text-right tabular-nums">{m.headshots}</td>
-                            <td className="text-right tabular-nums text-emerald-400">
-                              ${m.cash}
-                            </td>
+            {isFfa ? (
+              <div className="bg-[#0b0e14] border border-white/10 rounded p-3">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-slate-400 border-b border-white/10">
+                      <th className="text-left py-1">#</th>
+                      <th className="text-left py-1">Player</th>
+                      <th className="text-right py-1">Kills</th>
+                      <th className="text-right py-1">Deaths</th>
+                      <th className="text-right py-1">HS</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ffaSorted.map((m, idx) => (
+                      <tr
+                        key={m.id}
+                        className={`border-b border-white/5 last:border-0 ${
+                          m.isLocal ? 'text-amber-300 font-bold' : 'text-slate-200'
+                        } ${!m.alive ? 'opacity-60' : ''}`}
+                      >
+                        <td className="py-1.5 font-tactical-mono">{idx + 1}</td>
+                        <td className="py-1.5">
+                          {m.name} {m.isLocal ? '(You)' : ''} {!m.alive ? '(Respawning)' : ''}
+                        </td>
+                        <td className="text-right tabular-nums text-amber-300">{m.kills}</td>
+                        <td className="text-right tabular-nums">{m.deaths}</td>
+                        <td className="text-right tabular-nums">{m.headshots}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {(['attackers', 'defenders'] as const).map((team) => {
+                  const members = hud.scoreboard
+                    .filter((p) => p.team === team)
+                    .sort((a, b) => b.kills - a.kills);
+                  return (
+                    <div key={team} className="bg-[#0b0e14] border border-white/10 rounded p-3">
+                      <div
+                        className={`text-xs font-bold uppercase tracking-wider mb-2 ${
+                          team === 'attackers' ? 'text-amber-400' : 'text-sky-400'
+                        }`}
+                      >
+                        {team === 'attackers' ? 'Attackers' : 'Defenders'}
+                      </div>
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-slate-400 border-b border-white/10">
+                            <th className="text-left py-1">Player</th>
+                            <th className="text-right py-1">K</th>
+                            <th className="text-right py-1">D</th>
+                            <th className="text-right py-1">HS</th>
+                            <th className="text-right py-1">Cash</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                );
-              })}
-            </div>
+                        </thead>
+                        <tbody>
+                          {members.map((m) => (
+                            <tr
+                              key={m.id}
+                              className={`border-b border-white/5 last:border-0 ${
+                                m.isLocal ? 'text-amber-200 font-semibold' : 'text-slate-200'
+                              } ${!m.alive ? 'opacity-50' : ''}`}
+                            >
+                              <td className="py-1.5">
+                                {m.name} {!m.alive ? '(Dead)' : ''}
+                              </td>
+                              <td className="text-right tabular-nums">{m.kills}</td>
+                              <td className="text-right tabular-nums">{m.deaths}</td>
+                              <td className="text-right tabular-nums">{m.headshots}</td>
+                              <td className="text-right tabular-nums text-emerald-400">
+                                ${m.cash}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       )}

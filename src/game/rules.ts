@@ -33,6 +33,32 @@ export const ROUND_CONSTANTS = {
   DEFAULT_MAX_ROUNDS: 12, // MR6 competitive (6 rounds per half, first to 7)
 };
 
+export const GRENADE_TUNING = {
+  OVERHAND_SPEED: 28.9, // +65% from 17.5
+  UNDERHAND_SPEED: 14.0, // +65% from 8.5
+  OVERHAND_UP_BOOST: 4.5,
+  UNDERHAND_UP_BOOST: 2.6,
+  HE_RADIUS: 11.25, // +50% from 7.5
+  SMOKE_RADIUS: 5.7, // +50% from 3.8
+  FIRE_RADIUS: 5.4, // +50% from 3.6
+  FLASH_RADIUS: 51, // +50% from 34
+};
+
+export const C4_BLAST_CONSTANTS = {
+  INNER_LETHAL_RADIUS: 18,
+  OUTER_MAX_RADIUS: 35,
+  INNER_DAMAGE: 130,
+  MAX_OUTER_DAMAGE: 110,
+};
+
+export const FFA_CONSTANTS = {
+  TARGET_KILLS: 30,
+  TIME_LIMIT_SECONDS: 300, // 5 minutes
+  RESPAWN_SECONDS: 1.5,
+  SPAWN_PROTECTION_SECONDS: 1.5,
+  KILL_HEAL_HP: 50,
+};
+
 export function clampCash(cash: number): number {
   return Math.max(0, Math.min(ECONOMY_CONSTANTS.MAX_CASH, Math.round(cash)));
 }
@@ -162,7 +188,7 @@ export function calculateHeExplosionDamage(
   distanceMeters: number,
   targetArmor: number
 ): { hpDamage: number; armorDamage: number } {
-  const maxRadius = 7.5;
+  const maxRadius = GRENADE_TUNING.HE_RADIUS;
   if (distanceMeters >= maxRadius) return { hpDamage: 0, armorDamage: 0 };
   const falloff = 1 - distanceMeters / maxRadius;
   const raw = 98 * falloff * falloff;
@@ -172,6 +198,59 @@ export function calculateHeExplosionDamage(
     return { hpDamage, armorDamage };
   }
   return { hpDamage: Math.round(raw), armorDamage: 0 };
+}
+
+export function calculateC4DetonationDamage(
+  distanceMeters: number,
+  targetArmor: number
+): { hpDamage: number; armorDamage: number } {
+  if (distanceMeters <= C4_BLAST_CONSTANTS.INNER_LETHAL_RADIUS) {
+    // Inner lethal zone deals 120+ damage regardless of armor
+    return {
+      hpDamage: C4_BLAST_CONSTANTS.INNER_DAMAGE,
+      armorDamage: Math.min(targetArmor, 60),
+    };
+  }
+  if (distanceMeters >= C4_BLAST_CONSTANTS.OUTER_MAX_RADIUS) {
+    return { hpDamage: 0, armorDamage: 0 };
+  }
+  const span = C4_BLAST_CONSTANTS.OUTER_MAX_RADIUS - C4_BLAST_CONSTANTS.INNER_LETHAL_RADIUS;
+  const t = 1 - (distanceMeters - C4_BLAST_CONSTANTS.INNER_LETHAL_RADIUS) / span;
+  const raw = C4_BLAST_CONSTANTS.MAX_OUTER_DAMAGE * Math.pow(Math.max(0, t), 1.45);
+  if (targetArmor > 0) {
+    const hpDamage = Math.max(0, Math.round(raw * 0.62));
+    const armorDamage = Math.min(targetArmor, Math.round(raw * 0.38));
+    return { hpDamage, armorDamage };
+  }
+  return { hpDamage: Math.max(0, Math.round(raw)), armorDamage: 0 };
+}
+
+export function selectFarthestFfaSpawn<T extends { x: number; y: number; z: number }>(
+  spawns: ReadonlyArray<T>,
+  aliveOpponents: ReadonlyArray<{ x: number; z: number }>
+): T {
+  if (spawns.length === 0) {
+    return { x: 0, y: 0, z: 0 } as T;
+  }
+  if (aliveOpponents.length === 0) {
+    return spawns[Math.floor(Math.random() * spawns.length)];
+  }
+  let bestSpawn = spawns[0];
+  let bestMinDistSq = -1;
+  for (const sp of spawns) {
+    let minD2 = Infinity;
+    for (const opp of aliveOpponents) {
+      const dx = sp.x - opp.x;
+      const dz = sp.z - opp.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < minD2) minD2 = d2;
+    }
+    if (minD2 > bestMinDistSq) {
+      bestMinDistSq = minD2;
+      bestSpawn = sp;
+    }
+  }
+  return bestSpawn;
 }
 
 export function computeWeaponSpread(params: {

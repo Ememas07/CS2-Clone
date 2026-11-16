@@ -1,4 +1,4 @@
-import type { MapId, Team } from './types';
+import type { MapId, RampDirection, Team } from './types';
 
 export type MapMaterialKind =
   | 'sandstone'
@@ -22,6 +22,19 @@ export interface MapBox {
   wallbangable: boolean;
   penetrationFactor: number; // 0..1 multiplier when shot through
   castShadow?: boolean;
+  hiddenVisual?: boolean;
+}
+
+export interface MapRamp {
+  id: string;
+  x: number;
+  y: number;
+  z: number;
+  w: number;
+  h: number;
+  d: number;
+  direction: RampDirection;
+  material: MapMaterialKind;
 }
 
 export interface SiteZone {
@@ -63,7 +76,9 @@ export interface MapDefinition {
   siteZones: SiteZone[];
   buyZones: Record<Team, { x: number; z: number; radius: number }>;
   spawnPoints: Record<Team, SpawnAnchor[]>;
+  ffaSpawns?: SpawnAnchor[];
   boxes: MapBox[];
+  ramps?: MapRamp[];
   archLintels: Array<[number, number, number, number, number, number, MapMaterialKind?]>;
   waypoints: WaypointNode[];
 }
@@ -595,12 +610,150 @@ const OVERPASS_MAP: MapDefinition = {
   ],
 };
 
+function buildRampStepColliders(ramps: MapRamp[]): MapBox[] {
+  const out: MapBox[] = [];
+  for (const r of ramps) {
+    const steps = Math.max(4, Math.min(14, Math.ceil(r.h / 0.25)));
+    for (let s = 0; s < steps; s++) {
+      const frac = (s + 1) / steps;
+      const sliceH = r.h * frac;
+      let sx = r.x;
+      let sz = r.z;
+      let sw = r.w;
+      let sd = r.d;
+      if (r.direction === 'n' || r.direction === 's') {
+        const segD = r.d / steps;
+        const offsetIdx = r.direction === 'n' ? steps - 1 - s : s;
+        sz = r.z - r.d * 0.5 + segD * (offsetIdx + 0.5);
+        sd = segD + 0.04;
+      } else {
+        const segW = r.w / steps;
+        const offsetIdx = r.direction === 'w' ? steps - 1 - s : s;
+        sx = r.x - r.w * 0.5 + segW * (offsetIdx + 0.5);
+        sw = segW + 0.04;
+      }
+      out.push({
+        id: `${r.id}_step_${s}`,
+        x: sx,
+        y: r.y,
+        z: sz,
+        w: sw,
+        h: sliceH,
+        d: sd,
+        material: r.material,
+        wallbangable: false,
+        penetrationFactor: 0,
+        hiddenVisual: true,
+      });
+    }
+  }
+  return out;
+}
+
+const AWP_RAMPS: MapRamp[] = [
+  { id: 'awp_ramp_atk_w', x: -8.5, y: 0, z: 22, w: 5.0, h: 1.65, d: 4.6, direction: 'e', material: 'concrete' },
+  { id: 'awp_ramp_atk_e', x: 8.5, y: 0, z: 22, w: 5.0, h: 1.65, d: 4.6, direction: 'w', material: 'concrete' },
+  { id: 'awp_ramp_def_w', x: -8.5, y: 0, z: -22, w: 5.0, h: 1.65, d: 4.6, direction: 'e', material: 'concrete' },
+  { id: 'awp_ramp_def_e', x: 8.5, y: 0, z: -22, w: 5.0, h: 1.65, d: 4.6, direction: 'w', material: 'concrete' },
+];
+
+// 6. SNIPER PEAKS (Dedicated Symmetrical AWP-Only Arena)
+const AWP_ARENA_MAP: MapDefinition = {
+  id: 'awp_arena',
+  name: 'Sniper Peaks',
+  subtitle: 'Symmetrical AWP arena · Elevated sniper towers & long sightlines',
+  theme: {
+    floorTint: 0xe9eef2,
+    outerFloorColor: 0x909aa3,
+    mesaColor: 0x6f7b87,
+    fogColor: 0xd9e3ec,
+    skyColor: 0xcbe0f5,
+  },
+  bounds: { ...DEFAULT_BOUNDS },
+  siteZones: [
+    { site: 'A', x: -24, z: 0, radius: 6.5 },
+    { site: 'B', x: 24, z: 0, radius: 6.5 },
+  ],
+  buyZones: {
+    attackers: { x: 0, z: 44, radius: 11 },
+    defenders: { x: 0, z: -44, radius: 11 },
+  },
+  spawnPoints: {
+    attackers: [
+      { x: 0, y: 0, z: 45, yaw: 0 },
+      { x: -6, y: 0, z: 45.5, yaw: 0 },
+      { x: 6, y: 0, z: 45.5, yaw: 0 },
+      { x: -12, y: 0, z: 46, yaw: 0 },
+      { x: 12, y: 0, z: 46, yaw: 0 },
+    ],
+    defenders: [
+      { x: 0, y: 0, z: -45, yaw: Math.PI },
+      { x: -6, y: 0, z: -45.5, yaw: Math.PI },
+      { x: 6, y: 0, z: -45.5, yaw: Math.PI },
+      { x: -12, y: 0, z: -46, yaw: Math.PI },
+      { x: 12, y: 0, z: -46, yaw: Math.PI },
+    ],
+  },
+  ffaSpawns: [
+    { x: 0, y: 0, z: 42, yaw: 0 },
+    { x: 0, y: 0, z: -42, yaw: Math.PI },
+    { x: -34, y: 0, z: 24, yaw: -0.5 },
+    { x: 34, y: 0, z: 24, yaw: 0.5 },
+    { x: -34, y: 0, z: -24, yaw: -2.6 },
+    { x: 34, y: 0, z: -24, yaw: 2.6 },
+    { x: -30, y: 0, z: 0, yaw: -Math.PI / 2 },
+    { x: 30, y: 0, z: 0, yaw: Math.PI / 2 },
+  ],
+  ramps: AWP_RAMPS,
+  boxes: [
+    ...makePerimeterWalls('concrete'),
+    ...buildRampStepColliders(AWP_RAMPS),
+    // Spawn protection screens (prevents instant frame-0 headshots; peek left/right immediately)
+    { id: 'awp_screen_atk', x: 0, y: 0, z: 36, w: 12, h: 3.6, d: 1.8, material: 'concrete', wallbangable: false, penetrationFactor: 0 },
+    { id: 'awp_screen_def', x: 0, y: 0, z: -36, w: 12, h: 3.6, d: 1.8, material: 'concrete', wallbangable: false, penetrationFactor: 0 },
+    // Elevated sniper towers (N & S)
+    { id: 'awp_tower_atk', x: 0, y: 0, z: 22, w: 12, h: 1.65, d: 5.0, material: 'concrete', wallbangable: false, penetrationFactor: 0 },
+    { id: 'awp_tower_atk_lip', x: 0, y: 1.65, z: 19.8, w: 4.5, h: 0.65, d: 0.6, material: 'metal_slate', wallbangable: false, penetrationFactor: 0 },
+    { id: 'awp_tower_def', x: 0, y: 0, z: -22, w: 12, h: 1.65, d: 5.0, material: 'concrete', wallbangable: false, penetrationFactor: 0 },
+    { id: 'awp_tower_def_lip', x: 0, y: 1.65, z: -19.8, w: 4.5, h: 0.65, d: 0.6, material: 'metal_slate', wallbangable: false, penetrationFactor: 0 },
+    // Mid sniper pillars & wood peek crates
+    { id: 'awp_mid_pillar_w', x: -11, y: 0, z: 0, w: 2.8, h: 4.6, d: 2.8, material: 'sandstone', wallbangable: false, penetrationFactor: 0 },
+    { id: 'awp_mid_pillar_e', x: 11, y: 0, z: 0, w: 2.8, h: 4.6, d: 2.8, material: 'sandstone', wallbangable: false, penetrationFactor: 0 },
+    { id: 'awp_mid_box_c', x: 0, y: 0, z: 0, w: 2.2, h: 1.4, d: 2.2, material: 'wood', wallbangable: true, penetrationFactor: 0.6 },
+    // Flank sniper covers (West & East catwalks/bunkers)
+    { id: 'awp_flank_w_s', x: -29, y: 0, z: 14, w: 3.4, h: 2.6, d: 2.4, material: 'metal_slate', wallbangable: false, penetrationFactor: 0 },
+    { id: 'awp_flank_w_n', x: -29, y: 0, z: -14, w: 3.4, h: 2.6, d: 2.4, material: 'metal_slate', wallbangable: false, penetrationFactor: 0 },
+    { id: 'awp_flank_e_s', x: 29, y: 0, z: 14, w: 3.4, h: 2.6, d: 2.4, material: 'metal_slate', wallbangable: false, penetrationFactor: 0 },
+    { id: 'awp_flank_e_n', x: 29, y: 0, z: -14, w: 3.4, h: 2.6, d: 2.4, material: 'metal_slate', wallbangable: false, penetrationFactor: 0 },
+    { id: 'awp_wallbang_w', x: -22, y: 0, z: 0, w: 1.8, h: 2.4, d: 3.2, material: 'wood', wallbangable: true, penetrationFactor: 0.58 },
+    { id: 'awp_wallbang_e', x: 22, y: 0, z: 0, w: 1.8, h: 2.4, d: 3.2, material: 'wood', wallbangable: true, penetrationFactor: 0.58 },
+  ],
+  archLintels: [],
+  waypoints: [
+    { id: 'atk_spawn', x: 0, z: 42, callout: 'Attacker Base', neighbors: ['atk_w_exit', 'atk_e_exit'] },
+    { id: 'def_spawn', x: 0, z: -42, callout: 'Defender Base', neighbors: ['def_w_exit', 'def_e_exit'] },
+    { id: 'atk_w_exit', x: -16, z: 30, callout: 'West Peek S', neighbors: ['atk_spawn', 'a_site', 'mid_s'] },
+    { id: 'atk_e_exit', x: 16, z: 30, callout: 'East Peek S', neighbors: ['atk_spawn', 'b_site', 'mid_s'] },
+    { id: 'def_w_exit', x: -16, z: -30, callout: 'West Peek N', neighbors: ['def_spawn', 'a_site', 'mid_n'] },
+    { id: 'def_e_exit', x: 16, z: -30, callout: 'East Peek N', neighbors: ['def_spawn', 'b_site', 'mid_n'] },
+    { id: 'mid_s', x: -5, z: 12, callout: 'Mid South', neighbors: ['atk_w_exit', 'atk_e_exit', 'mid_center'] },
+    { id: 'mid_center', x: -5, z: 0, callout: 'Center Gap', neighbors: ['mid_s', 'mid_n', 'a_site', 'b_site'] },
+    { id: 'mid_n', x: -5, z: -12, callout: 'Mid North', neighbors: ['def_w_exit', 'def_e_exit', 'mid_center'] },
+    { id: 'a_site', x: -17, z: 0, callout: 'West Wing', neighbors: ['atk_w_exit', 'def_w_exit', 'mid_center'] },
+    { id: 'b_site', x: 17, z: 0, callout: 'East Wing', neighbors: ['atk_e_exit', 'def_e_exit', 'mid_center'] },
+  ],
+};
+
+let customMapOverride: MapDefinition | null = null;
+
 export const MAPS: Record<MapId, MapDefinition> = {
   sandline: SANDLINE_MAP,
   dust2: DUST2_MAP,
   mirage: MIRAGE_MAP,
   inferno: INFERNO_MAP,
   overpass: OVERPASS_MAP,
+  awp_arena: AWP_ARENA_MAP,
+  custom: SANDLINE_MAP,
 };
 
 export const MAP_LIST: Array<{ id: MapId; name: string; subtitle: string }> = [
@@ -611,25 +764,53 @@ export const MAP_LIST: Array<{ id: MapId; name: string; subtitle: string }> = [
   { id: 'overpass', name: OVERPASS_MAP.name, subtitle: OVERPASS_MAP.subtitle },
 ];
 
+export function registerCustomMap(def: MapDefinition): void {
+  customMapOverride = def;
+  MAPS.custom = def;
+}
+
+export function clearCustomMap(): void {
+  customMapOverride = null;
+  MAPS.custom = SANDLINE_MAP;
+}
+
+export function getCustomMapDefinition(): MapDefinition | null {
+  return customMapOverride;
+}
+
 // Active map mutable bindings (updated atomically via setActiveMap)
 export let ACTIVE_MAP: MapDefinition = SANDLINE_MAP;
 export let MAP_BOUNDS = ACTIVE_MAP.bounds;
 export let SITE_ZONES = ACTIVE_MAP.siteZones;
 export let BUY_ZONES = ACTIVE_MAP.buyZones;
 export let SPAWN_POINTS = ACTIVE_MAP.spawnPoints;
+export let FFA_SPAWNS: SpawnAnchor[] = [];
 export let MAP_BOXES = ACTIVE_MAP.boxes;
 export let WAYPOINTS = ACTIVE_MAP.waypoints;
 export let WAYPOINT_MAP = new Map<string, WaypointNode>(
   WAYPOINTS.map((w) => [w.id, w])
 );
 
+function buildDefaultFfaSpawns(def: MapDefinition): SpawnAnchor[] {
+  if (def.ffaSpawns && def.ffaSpawns.length > 0) return def.ffaSpawns;
+  const list: SpawnAnchor[] = [
+    ...def.spawnPoints.attackers.slice(0, 3),
+    ...def.spawnPoints.defenders.slice(0, 3),
+  ];
+  for (const sz of def.siteZones) {
+    list.push({ x: sz.x, y: 0, z: sz.z, yaw: sz.x < 0 ? -Math.PI / 2 : Math.PI / 2 });
+  }
+  return list;
+}
+
 export function setActiveMap(mapId: MapId): MapDefinition {
-  const next = MAPS[mapId] ?? SANDLINE_MAP;
+  const next = mapId === 'custom' && customMapOverride ? customMapOverride : (MAPS[mapId] ?? SANDLINE_MAP);
   ACTIVE_MAP = next;
   MAP_BOUNDS = next.bounds;
   SITE_ZONES = next.siteZones;
   BUY_ZONES = next.buyZones;
   SPAWN_POINTS = next.spawnPoints;
+  FFA_SPAWNS = buildDefaultFfaSpawns(next);
   MAP_BOXES = next.boxes;
   WAYPOINTS = next.waypoints;
   WAYPOINT_MAP = new Map<string, WaypointNode>(WAYPOINTS.map((w) => [w.id, w]));

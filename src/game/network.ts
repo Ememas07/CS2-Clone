@@ -280,15 +280,15 @@ export class TacticalNetworkClient {
         // Send application ping
         this.send({ type: 'ping', clientTime: performance.now() });
 
-        // Check if connection is stale (no message for > 12s)
-        if (Date.now() - this.lastMessageTime > 12000) {
-          console.warn('[network] Connection stale (no frames for >12s). Reconnecting.');
+        // Check if connection is stale (no message for > 15s)
+        if (Date.now() - this.lastMessageTime > 15000) {
+          console.warn('[network] Connection stale (no frames for >15s). Reconnecting.');
           try {
             this.ws.close();
           } catch {}
         }
       }
-    }, 4000);
+    }, 5000);
   }
 
   private stopHeartbeat(): void {
@@ -303,7 +303,7 @@ export class TacticalNetworkClient {
     if (this.reconnectTimer !== null) return;
 
     this.reconnectAttempts++;
-    const delay = Math.min(2500, 400 + Math.min(this.reconnectAttempts, 5) * 400);
+    const delay = Math.min(10000, 500 * Math.pow(2, Math.min(this.reconnectAttempts - 1, 5)));
     console.log(`[network] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})...`);
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
@@ -345,9 +345,10 @@ export class TacticalNetworkClient {
   public createRoom(params: {
     playerName: string;
     team: Team;
-    mode: 'pvp' | 'mixed';
+    mode: 'pvp' | 'mixed' | 'awp' | 'ffa';
     mapId: import('./types').MapId;
     botDifficulty: BotDifficulty;
+    customMapData?: import('./types').CustomMapJson;
   }): void {
     this.lastPlayerName = params.playerName;
     this.send({ type: 'create_room', ...params });

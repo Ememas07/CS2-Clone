@@ -3,10 +3,18 @@ import { BuyMenu } from './components/BuyMenu';
 import { MainMenu } from './components/MainMenu';
 import { StatusModal } from './components/StatusModal';
 import { TacticalHUD } from './components/TacticalHUD';
+import { loadCrosshairConfig, saveCrosshairConfig } from './game/crosshair';
 import { GameEngine, type MatchConfig } from './game/engine';
 import { networkClient } from './game/network';
 import { ROUND_CONSTANTS } from './game/rules';
-import type { BuyableGearId, HudSnapshot, MapId, WeaponSlot } from './game/types';
+import type {
+  BuyableGearId,
+  CrosshairConfig,
+  CustomMapJson,
+  HudSnapshot,
+  MapId,
+  WeaponSlot,
+} from './game/types';
 
 function loadInitialSensitivity(): number {
   try {
@@ -27,6 +35,7 @@ export default function App() {
   const lastConfigRef = useRef<MatchConfig>({
     mode: 'bots',
     mapId: 'sandline',
+    customMapData: null,
     playerTeam: 'attackers',
     playerName: 'Operator',
     difficulty: 55,
@@ -37,6 +46,7 @@ export default function App() {
   const [buyMenuOpen, setBuyMenuOpen] = useState(false);
   const [showScoreboard, setShowScoreboard] = useState(false);
   const [sensitivity, setSensitivity] = useState<number>(loadInitialSensitivity);
+  const [crosshairConfig, setCrosshairConfig] = useState<CrosshairConfig>(loadCrosshairConfig);
   const initialSensitivityRef = useRef(sensitivity);
 
   const handleStartMatch = useCallback((cfg: MatchConfig) => {
@@ -46,9 +56,18 @@ export default function App() {
     engineRef.current?.startMatch(cfg);
   }, []);
 
-  const handlePreviewMap = useCallback((mapId: MapId) => {
-    lastConfigRef.current = { ...lastConfigRef.current, mapId };
-    engineRef.current?.loadMap(mapId);
+  const handlePreviewMap = useCallback((mapId: MapId, customMapData?: CustomMapJson | null) => {
+    lastConfigRef.current = {
+      ...lastConfigRef.current,
+      mapId,
+      customMapData: customMapData ?? null,
+    };
+    engineRef.current?.loadMap(mapId, customMapData);
+  }, []);
+
+  const handleChangeCrosshair = useCallback((next: CrosshairConfig) => {
+    const saved = saveCrosshairConfig(next);
+    setCrosshairConfig(saved);
   }, []);
 
   useEffect(() => {
@@ -78,7 +97,7 @@ export default function App() {
     };
   }, []);
 
-  // Global HUD/Menu hotkeys: B (Buy Menu), Escape (Pause or close Buy Menu), M (Mute), Tab (Scoreboard)
+  // Global HUD/Menu hotkeys: B (Buy Menu), F3 (Rebuy), Escape (Pause or close Buy Menu), M (Mute), Tab (Scoreboard)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const engine = engineRef.current;
@@ -98,6 +117,12 @@ export default function App() {
             if (next) engine.exitPointerLock(true);
             return next;
           });
+          return;
+        }
+
+        if (e.code === 'F3' && !buyMenuOpen && hud.canBuy && hud.localAlive) {
+          e.preventDefault();
+          engine.rebuyPreviousLoadout();
           return;
         }
 
@@ -149,6 +174,11 @@ export default function App() {
   const handleBuyItem = useCallback((itemId: BuyableGearId) => {
     if (!engineRef.current) return { ok: false, reason: 'Engine unavailable' };
     return engineRef.current.buyWeaponOrItem(itemId);
+  }, []);
+
+  const handleRebuyLoadout = useCallback(() => {
+    if (!engineRef.current) return { ok: false, reason: 'Engine unavailable' };
+    return engineRef.current.rebuyPreviousLoadout();
   }, []);
 
   const handleSelectSlot = useCallback((slot: WeaponSlot) => {
@@ -208,6 +238,8 @@ export default function App() {
         <MainMenu
           sensitivity={sensitivity}
           onChangeSensitivity={handleChangeSensitivity}
+          crosshairConfig={crosshairConfig}
+          onChangeCrosshair={handleChangeCrosshair}
           onStartMatch={handleStartMatch}
           onPreviewMap={handlePreviewMap}
         />
@@ -216,6 +248,7 @@ export default function App() {
       {screen === 'playing' && hud && (
         <TacticalHUD
           hud={hud}
+          crosshairConfig={crosshairConfig}
           showScoreboard={showScoreboard}
           buyMenuOpen={buyMenuOpen}
           onOpenBuyMenu={() => {
@@ -234,6 +267,7 @@ export default function App() {
         <BuyMenu
           hud={hud}
           onBuy={handleBuyItem}
+          onRebuy={handleRebuyLoadout}
           onClose={() => {
             setBuyMenuOpen(false);
             engineRef.current?.requestPointerLock();
@@ -246,6 +280,8 @@ export default function App() {
           hud={hud}
           sensitivity={sensitivity}
           onChangeSensitivity={handleChangeSensitivity}
+          crosshairConfig={crosshairConfig}
+          onChangeCrosshair={handleChangeCrosshair}
           onResume={handleResume}
           onRestart={handleRestart}
           onMainMenu={handleMainMenu}
