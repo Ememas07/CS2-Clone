@@ -222,13 +222,21 @@ export function MainMenu({
 
   const handleConnect = () => {
     setLobbyError(null);
-    networkClient.connect(wsUrl);
+    const target = getDefaultWebSocketUrl(wsUrl);
+    if (target !== wsUrl) {
+      setWsUrl(target);
+    }
+    networkClient.connect(target);
   };
 
   const handleCreateRoom = () => {
     setLobbyError(null);
     if (wsStatus !== 'connected') {
-      networkClient.connect(wsUrl);
+      const target = getDefaultWebSocketUrl(wsUrl);
+      if (target !== wsUrl) {
+        setWsUrl(target);
+      }
+      networkClient.connect(target);
     }
     const netMode: 'pvp' | 'mixed' | 'awp' | 'ffa' =
       mode === 'mixed' || mode === 'awp' || mode === 'ffa' ? mode : 'pvp';
@@ -249,7 +257,11 @@ export function MainMenu({
     }
     setLobbyError(null);
     if (wsStatus !== 'connected') {
-      networkClient.connect(wsUrl);
+      const target = getDefaultWebSocketUrl(wsUrl);
+      if (target !== wsUrl) {
+        setWsUrl(target);
+      }
+      networkClient.connect(target);
     }
     networkClient.joinRoom({
       roomId: roomCodeInput.trim().toUpperCase(),
@@ -689,6 +701,11 @@ export function MainMenu({
                     type="text"
                     value={wsUrl}
                     onChange={(e) => setWsUrl(e.target.value)}
+                    onBlur={() => {
+                      if (!wsUrl.trim()) {
+                        setWsUrl(getDefaultWebSocketUrl());
+                      }
+                    }}
                     className="flex-1 px-2.5 py-1.5 text-xs font-tactical-mono bg-[#0b0e14] border border-white/15 rounded text-slate-200 focus:outline-none focus:border-amber-400"
                   />
                   <button

@@ -67,10 +67,51 @@ export interface NetworkCallbacks {
   ) => void;
 }
 
-export function getDefaultWebSocketUrl(): string {
-  if (typeof window === 'undefined') return 'ws://localhost:3000/ws';
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${window.location.host}/ws`;
+export function getDefaultWebSocketUrl(customUrl?: string): string {
+  if (typeof window === 'undefined') {
+    if (customUrl && customUrl.trim()) {
+      const trimmed = customUrl.trim();
+      if (!trimmed.includes('game=')) {
+        const sep = trimmed.includes('?') ? '&' : '?';
+        return `${trimmed}${sep}game=CS2-Clone`;
+      }
+      return trimmed;
+    }
+    return 'ws://localhost:3000/ws?game=CS2-Clone';
+  }
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const gameSlug = window.location.pathname.split('/').filter(Boolean)[0] || 'CS2-Clone';
+
+  if (!customUrl || !customUrl.trim()) {
+    return `${protocol}//${window.location.host}/ws?game=${encodeURIComponent(gameSlug)}`;
+  }
+
+  const trimmed = customUrl.trim();
+  const candidate =
+    !trimmed.includes('://') && !trimmed.startsWith('/')
+      ? `${protocol}//${trimmed}`
+      : trimmed;
+
+  try {
+    const parsed = new URL(candidate, window.location.href);
+    if (parsed.protocol === 'http:') parsed.protocol = 'ws:';
+    else if (parsed.protocol === 'https:') parsed.protocol = 'wss:';
+    if (!parsed.searchParams.has('game')) {
+      parsed.searchParams.set('game', gameSlug);
+    }
+    return parsed.toString();
+  } catch {
+    if (!trimmed.includes('game=')) {
+      const sep = trimmed.includes('?') ? '&' : '?';
+      return `${trimmed}${sep}game=${encodeURIComponent(gameSlug)}`;
+    }
+    return trimmed;
+  }
+}
+
+export function resolveWebSocketUrl(customUrl?: string): string {
+  return getDefaultWebSocketUrl(customUrl);
 }
 
 export class TacticalNetworkClient {
@@ -94,7 +135,10 @@ export class TacticalNetworkClient {
   }
 
   public connect(url?: string): void {
-    const targetUrl = (url && url.trim()) || this.lastUrl || getDefaultWebSocketUrl();
+    const targetUrl =
+      url !== undefined
+        ? getDefaultWebSocketUrl(url)
+        : (this.lastUrl ? getDefaultWebSocketUrl(this.lastUrl) : getDefaultWebSocketUrl());
     this.lastUrl = targetUrl;
     this.intentionalDisconnect = false;
 
