@@ -155,10 +155,15 @@ export class TacticalNetworkClient {
       this.reconnectTimer = null;
     }
 
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+    if (this.ws) {
       try {
+        this.ws.onopen = null;
+        this.ws.onmessage = null;
+        this.ws.onerror = null;
+        this.ws.onclose = null;
         this.ws.close();
       } catch {}
+      this.ws = null;
     }
 
     this.callbacks.onStatusChange?.('connecting');
@@ -363,10 +368,15 @@ export class TacticalNetworkClient {
   private scheduleReconnect(): void {
     if (this.intentionalDisconnect || typeof window === 'undefined') return;
     if (this.reconnectTimer !== null) return;
+    if (this.reconnectAttempts >= 5) {
+      console.log('[network] Max reconnect attempts (5) reached. Stopping automatic reconnection.');
+      return;
+    }
 
     this.reconnectAttempts++;
-    const delay = Math.min(10000, 500 * Math.pow(2, Math.min(this.reconnectAttempts - 1, 5)));
-    console.log(`[network] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})...`);
+    // Strict exponential backoff: 1000ms -> 2000ms -> 4000ms -> 8000ms (max 5 attempts)
+    const delay = 1000 * Math.pow(2, Math.min(this.reconnectAttempts - 1, 3));
+    console.log(`[network] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/5)...`);
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
@@ -380,8 +390,13 @@ export class TacticalNetworkClient {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.reconnectAttempts = 0;
     if (this.ws) {
       try {
+        this.ws.onopen = null;
+        this.ws.onmessage = null;
+        this.ws.onerror = null;
+        this.ws.onclose = null;
         this.ws.close();
       } catch {}
       this.ws = null;

@@ -78,6 +78,7 @@ export function MainMenu({
   const [room, setRoom] = useState<RoomInfo | null>(null);
   const [yourId, setYourId] = useState<string | null>(null);
   const [lobbyError, setLobbyError] = useState<string | null>(null);
+  const hasAutoConnectedRef = useRef(false);
 
   useEffect(() => {
     try {
@@ -207,16 +208,14 @@ export function MainMenu({
     showCustomMapModal,
   ]);
 
-  // Auto-connect to WebSocket server when viewing multiplayer lobby
+  // Auto-connect to WebSocket server once when entering multiplayer view
   useEffect(() => {
-    if (!isOfflineStartMode && wsStatus === 'disconnected') {
+    if (!isOfflineStartMode && !hasAutoConnectedRef.current) {
+      hasAutoConnectedRef.current = true;
       const target = getDefaultWebSocketUrl(wsUrl);
-      if (target !== wsUrl) {
-        setWsUrl(target);
-      }
       networkClient.connect(target);
     }
-  }, [isOfflineStartMode, wsStatus, wsUrl]);
+  }, [isOfflineStartMode]);
 
   const handleSelectMode = (nextMode: GameMode) => {
     setMode(nextMode);
