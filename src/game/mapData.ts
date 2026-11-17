@@ -35,6 +35,24 @@ export interface MapRamp {
   d: number;
   direction: RampDirection;
   material: MapMaterialKind;
+  color?: string;
+}
+
+export interface MapVisualBlock {
+  id: string;
+  x: number;
+  y: number;
+  z: number;
+  w: number;
+  h: number;
+  d: number;
+  material: MapMaterialKind;
+  rotation?: [number, number, number];
+  color?: string;
+  mesh?: {
+    positions: number[];
+    indices?: number[];
+  };
 }
 
 export interface SiteZone {
@@ -78,6 +96,7 @@ export interface MapDefinition {
   spawnPoints: Record<Team, SpawnAnchor[]>;
   ffaSpawns?: SpawnAnchor[];
   boxes: MapBox[];
+  visualBlocks?: MapVisualBlock[];
   ramps?: MapRamp[];
   archLintels: Array<[number, number, number, number, number, number, MapMaterialKind?]>;
   waypoints: WaypointNode[];
@@ -846,6 +865,45 @@ export interface AabbCollisionResult {
   z: number;
   grounded: boolean;
   groundY: number;
+  hitCeiling?: boolean;
+}
+
+function circleIntersectsBoxXZ(
+  cx: number,
+  cz: number,
+  radius: number,
+  b: MapBox
+): boolean {
+  const bx0 = b.x - b.w * 0.5;
+  const bx1 = b.x + b.w * 0.5;
+  const bz0 = b.z - b.d * 0.5;
+  const bz1 = b.z + b.d * 0.5;
+  const nearX = Math.max(bx0, Math.min(cx, bx1));
+  const nearZ = Math.max(bz0, Math.min(cz, bz1));
+  const dx = cx - nearX;
+  const dz = cz - nearZ;
+  return dx * dx + dz * dz < radius * radius;
+}
+
+export function hasStandingClearance(
+  x: number,
+  y: number,
+  z: number,
+  radius: number,
+  standingHeight = 1.85,
+  boxes: MapBox[] = MAP_BOXES
+): boolean {
+  const checkRadius = Math.max(0.1, radius - 0.02);
+  for (const b of boxes) {
+    const topY = b.y + b.h;
+    const botY = b.y;
+    if (topY > y + 1.15 && botY < y + standingHeight - 0.02) {
+      if (circleIntersectsBoxXZ(x, z, checkRadius, b)) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 export function resolvePlayerMovement(
@@ -857,41 +915,107 @@ export function resolvePlayerMovement(
   height: number,
   boxes: MapBox[] = MAP_BOXES
 ): AabbCollisionResult {
-  let nx = Math.max(MAP_BOUNDS.minX + radius + 1, Math.min(MAP_BOUNDS.maxX - radius - 1, x));
-  let nz = Math.max(MAP_BOUNDS.minZ + radius + 1, Math.min(MAP_BOUNDS.maxZ - radius - 1, z));
+  const minBoundX = MAP_BOUNDS.minX + radius + 1;
+  const maxBoundX = MAP_BOUNDS.maxX - radius - 1;
+  const minBoundZ = MAP_BOUNDS.minZ + radius + 1;
+  const maxBoundZ = MAP_BOUNDS.maxZ - radius - 1;
+
+  let nx = Math.max(minBoundX, Math.min(maxBoundX, x));
+  let nz = Math.max(minBoundZ, Math.min(maxBoundZ, z));
   let ny = y;
   let groundY = 0;
   let grounded = false;
+  let hitCeiling = false;
 
   const stepHeight = 0.85;
+  const rSq = radius * radius;
 
-  for (const b of boxes) {
-    const minX = b.x - b.w * 0.5 - radius;
-    const maxX = b.x + b.w * 0.5 + radius;
-    const minZ = b.z - b.d * 0.5 - radius;
-    const maxZ = b.z + b.d * 0.5 + radius;
-    const topY = b.y + b.h;
-    const botY = b.y;
+  for (let pass = 0; pass < 3; pass++) {
+    groundY = 0;
+    for (const b of boxes) {
+      const bx0 = b.x - b.w * 0.5;
+      const bx1 = b.x + b.w * 0.5;
+      const bz0 = b.z - b.d * 0.5;
+      const bz1 = b.z + b.d * 0.5;
+      const nearX = Math.max(bx0, Math.min(nx, bx1));
+      const nearZ = Math.max(bz0, Math.min(nz, bz1));
+      const dx = nx - nearX;
+      const dz = nz - nearZ;
+      const distSq = dx * dx + dz * dz;
+      if (distSq >= rSq) continue;
 
-    if (nx > minX && nx < maxX && nz > minZ && nz < maxZ) {
-      if (ny + height > botY && ny < topY) {
-        if (ny >= topY - stepHeight && vy <= 0.5) {
+      const topY = b.y + b.h;
+      const botY = b.y;
+
+      // Support / step-up check when player feet are near or above the box's top face
+      if (ny + height > botY + 0.001 && ny >= topY - stepHeight && ny <= topY + 0.01 && vy <= 0.5) {
+        let canStep = true;
+        if (ny < topY - 0.005) {
+          for (const other of boxes) {
+            if (other === b) continue;
+            const oTopY = other.y + other.h;
+            const oBotY = other.y;
+            if (
+              oTopY > topY + 0.02 &&
+              oBotY < topY + height - 0.02 &&
+              (oBotY >= topY - 0.02 || oTopY > topY + stepHeight) &&
+              circleIntersectsBoxXZ(nx, nz, radius - 0.02, other)
+            ) {
+              canStep = false;
+              break;
+            }
+          }
+        }
+        if (canStep || ny >= topY - 0.005) {
           if (topY > groundY) {
             groundY = topY;
           }
           continue;
         }
-        const penLeft = nx - minX;
-        const penRight = maxX - nx;
-        const penBack = nz - minZ;
-        const penFront = maxZ - nz;
-        const minPen = Math.min(penLeft, penRight, penBack, penFront);
-        if (minPen === penLeft) nx = minX;
-        else if (minPen === penRight) nx = maxX;
-        else if (minPen === penBack) nz = minZ;
-        else nz = maxZ;
+      }
+
+      if (ny + height > botY + 0.001 && ny < topY - 0.001) {
+        // Overhead ceiling bump: entering from beneath an elevated overhang instead of hitting its side
+        if (vy > 0 && botY > ny + 0.45 && botY - height >= groundY) {
+          const headPen = ny + height - botY;
+          const dist = Math.sqrt(distSq);
+          const edgePen =
+            distSq > 1e-8
+              ? radius - dist
+              : radius + Math.min(nx - bx0, bx1 - nx, nz - bz0, bz1 - nz);
+          if (headPen > 0 && headPen <= 0.35 && edgePen > headPen) {
+            ny = botY - height;
+            hitCeiling = true;
+            continue;
+          }
+        }
+
+        // Smooth Circle-vs-AABB XZ push-out (avoids colinear wall seam snags & sharp corners)
+        if (distSq > 1e-8) {
+          const dist = Math.sqrt(distSq);
+          const push = radius - dist;
+          nx += (dx / dist) * push;
+          nz += (dz / dist) * push;
+        } else {
+          const minX = bx0 - radius;
+          const maxX = bx1 + radius;
+          const minZ = bz0 - radius;
+          const maxZ = bz1 + radius;
+          const penLeft = nx - minX;
+          const penRight = maxX - nx;
+          const penBack = nz - minZ;
+          const penFront = maxZ - nz;
+          const minPen = Math.min(penLeft, penRight, penBack, penFront);
+          if (minPen === penLeft) nx = minX;
+          else if (minPen === penRight) nx = maxX;
+          else if (minPen === penBack) nz = minZ;
+          else nz = maxZ;
+        }
       }
     }
+
+    nx = Math.max(minBoundX, Math.min(maxBoundX, nx));
+    nz = Math.max(minBoundZ, Math.min(maxBoundZ, nz));
   }
 
   if (ny <= groundY + 0.001 && vy <= 0) {
@@ -899,7 +1023,7 @@ export function resolvePlayerMovement(
     grounded = true;
   }
 
-  return { x: nx, y: ny, z: nz, grounded, groundY };
+  return { x: nx, y: ny, z: nz, grounded, groundY, hitCeiling };
 }
 
 export interface RayBoxHit {
@@ -911,6 +1035,211 @@ export interface RayBoxHit {
   nx: number;
   ny: number;
   nz: number;
+}
+
+export interface BallisticPenetrationSegment {
+  enterDist: number;
+  exitDist: number;
+  factor: number;
+  box: MapBox;
+}
+
+export interface BallisticRayResult {
+  stopDist: number;
+  firstHit: RayBoxHit | null;
+  penetrations: BallisticPenetrationSegment[];
+  blockedBySolidWall: boolean;
+}
+
+function intersectRayAabbUnbounded(
+  ox: number,
+  oy: number,
+  oz: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  b: MapBox
+): { tEnter: number; tExit: number; nx: number; ny: number; nz: number } | null {
+  const minX = b.x - b.w * 0.5;
+  const maxX = b.x + b.w * 0.5;
+  const minY = b.y;
+  const maxY = b.y + b.h;
+  const minZ = b.z - b.d * 0.5;
+  const maxZ = b.z + b.d * 0.5;
+
+  let tmin = -Infinity;
+  let tmax = Infinity;
+  let nx = 0;
+  let ny = 0;
+  let nz = 0;
+
+  if (Math.abs(dx) < 1e-8) {
+    if (ox < minX || ox > maxX) return null;
+  } else {
+    const inv = 1 / dx;
+    let t1 = (minX - ox) * inv;
+    let t2 = (maxX - ox) * inv;
+    let sign = -1;
+    if (t1 > t2) {
+      const tmp = t1;
+      t1 = t2;
+      t2 = tmp;
+      sign = 1;
+    }
+    if (t1 > tmin) {
+      tmin = t1;
+      nx = sign;
+      ny = 0;
+      nz = 0;
+    }
+    if (t2 < tmax) tmax = t2;
+    if (tmin > tmax) return null;
+  }
+
+  if (Math.abs(dy) < 1e-8) {
+    if (oy < minY || oy > maxY) return null;
+  } else {
+    const inv = 1 / dy;
+    let t1 = (minY - oy) * inv;
+    let t2 = (maxY - oy) * inv;
+    let sign = -1;
+    if (t1 > t2) {
+      const tmp = t1;
+      t1 = t2;
+      t2 = tmp;
+      sign = 1;
+    }
+    if (t1 > tmin) {
+      tmin = t1;
+      nx = 0;
+      ny = sign;
+      nz = 0;
+    }
+    if (t2 < tmax) tmax = t2;
+    if (tmin > tmax) return null;
+  }
+
+  if (Math.abs(dz) < 1e-8) {
+    if (oz < minZ || oz > maxZ) return null;
+  } else {
+    const inv = 1 / dz;
+    let t1 = (minZ - oz) * inv;
+    let t2 = (maxZ - oz) * inv;
+    let sign = -1;
+    if (t1 > t2) {
+      const tmp = t1;
+      t1 = t2;
+      t2 = tmp;
+      sign = 1;
+    }
+    if (t1 > tmin) {
+      tmin = t1;
+      nx = 0;
+      ny = 0;
+      nz = sign;
+    }
+    if (t2 < tmax) tmax = t2;
+    if (tmin > tmax) return null;
+  }
+
+  if (tmax < 0) return null;
+  return { tEnter: tmin, tExit: tmax, nx, ny, nz };
+}
+
+export function isPointInsideMapBox(
+  x: number,
+  y: number,
+  z: number,
+  boxes: MapBox[] = MAP_BOXES,
+  eps = 0.002
+): boolean {
+  for (const b of boxes) {
+    if (
+      x > b.x - b.w * 0.5 + eps &&
+      x < b.x + b.w * 0.5 - eps &&
+      y > b.y + eps &&
+      y < b.y + b.h - eps &&
+      z > b.z - b.d * 0.5 + eps &&
+      z < b.z + b.d * 0.5 - eps
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function traceBallisticRay(
+  ox: number,
+  oy: number,
+  oz: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  maxDist: number,
+  maxPenetrations = 2,
+  boxes: MapBox[] = MAP_BOXES
+): BallisticRayResult {
+  const penetrations: BallisticPenetrationSegment[] = [];
+  let firstHit: RayBoxHit | null = null;
+  let stopDist = maxDist;
+  let blockedBySolidWall = false;
+  let curT = 0;
+
+  for (let iter = 0; iter < maxPenetrations + 6; iter++) {
+    let bestBox: MapBox | null = null;
+    let bestHitT = maxDist;
+    let bestRes: { tEnter: number; tExit: number; nx: number; ny: number; nz: number } | null = null;
+
+    for (const b of boxes) {
+      const res = intersectRayAabbUnbounded(ox, oy, oz, dx, dy, dz, b);
+      if (!res) continue;
+      if (res.tExit <= curT + 0.001) continue;
+      const enterClamped = Math.max(curT, res.tEnter);
+      if (enterClamped >= maxDist) continue;
+      if (enterClamped < bestHitT) {
+        bestHitT = enterClamped;
+        bestBox = b;
+        bestRes = res;
+      }
+    }
+
+    if (!bestBox || !bestRes) {
+      break;
+    }
+
+    if (!firstHit) {
+      firstHit = {
+        box: bestBox,
+        distance: bestHitT,
+        hx: ox + dx * bestHitT,
+        hy: oy + dy * bestHitT,
+        hz: oz + dz * bestHitT,
+        nx: bestRes.nx,
+        ny: bestRes.ny,
+        nz: bestRes.nz,
+      };
+    }
+
+    if (!bestBox.wallbangable || penetrations.length >= maxPenetrations) {
+      stopDist = bestHitT;
+      blockedBySolidWall = true;
+      break;
+    }
+
+    penetrations.push({
+      enterDist: bestHitT,
+      exitDist: bestRes.tExit,
+      factor: bestBox.penetrationFactor > 0 ? bestBox.penetrationFactor : 0.5,
+      box: bestBox,
+    });
+
+    curT = bestRes.tExit + 0.002;
+    if (curT >= maxDist) {
+      break;
+    }
+  }
+
+  return { stopDist, firstHit, penetrations, blockedBySolidWall };
 }
 
 export function raycastMapBoxes(
@@ -1044,6 +1373,10 @@ export function hasLineOfSight(
   const dx = vx / dist;
   const dy = vy / dist;
   const dz = vz / dist;
+
+  if (isPointInsideMapBox(x1, y1, z1) || isPointInsideMapBox(x2, y2, z2)) {
+    return false;
+  }
 
   const hit = raycastMapBoxes(x1, y1, z1, dx, dy, dz, dist - 0.1);
   if (hit) return false;

@@ -175,7 +175,7 @@ export function evaluateBotVision(params: {
   if (bot.blindTimer > 0.2) return null;
 
   const botId = 'id' in bot ? bot.id : '';
-  const eyeY = bot.y + (bot.crouching ? 1.08 : 1.55);
+  const eyeY = bot.y + (bot.crouching ? 1.08 : 1.62);
   const lookX = -Math.sin(bot.yaw);
   const lookZ = -Math.cos(bot.yaw);
 
@@ -319,32 +319,34 @@ export function performBotBuyPhase(actor: ActorState, index: number, isAwpOnly =
   actor.activeSlot = actor.primary ? 1 : 2;
 }
 
-function hasBotClearance(x1: number, z1: number, x2: number, z2: number): boolean {
+function hasBotClearance(x1: number, z1: number, x2: number, z2: number, yOffset = 0): boolean {
   const dx = x2 - x1;
   const dz = z2 - z1;
   const dist = Math.hypot(dx, dz);
   if (dist < 0.25) return true;
-  if (!hasLineOfSight(x1, 0.9, z1, x2, 0.9, z2, [])) return false;
+  const probeY = yOffset + 0.9;
+  if (!hasLineOfSight(x1, probeY, z1, x2, probeY, z2, [])) return false;
   const px = (-dz / dist) * 0.42;
   const pz = (dx / dist) * 0.42;
   return (
-    hasLineOfSight(x1 + px, 0.9, z1 + pz, x2 + px, 0.9, z2 + pz, []) &&
-    hasLineOfSight(x1 - px, 0.9, z1 - pz, x2 - px, 0.9, z2 - pz, [])
+    hasLineOfSight(x1 + px, probeY, z1 + pz, x2 + px, probeY, z2 + pz, []) &&
+    hasLineOfSight(x1 - px, probeY, z1 - pz, x2 - px, probeY, z2 - pz, [])
   );
 }
 
-function pickStartWaypointId(x: number, z: number): string {
+function pickStartWaypointId(x: number, z: number, yOffset = 0): string {
   let bestVisId: string | null = null;
   let bestVisDist = Infinity;
   let fallbackVisId: string | null = null;
   let fallbackDist = Infinity;
+  const probeY = yOffset + 0.9;
 
   for (const w of WAYPOINTS) {
     const d2 = (w.x - x) * (w.x - x) + (w.z - z) * (w.z - z);
-    if (d2 < bestVisDist && hasBotClearance(x, z, w.x, w.z)) {
+    if (d2 < bestVisDist && hasBotClearance(x, z, w.x, w.z, yOffset)) {
       bestVisDist = d2;
       bestVisId = w.id;
-    } else if (d2 < fallbackDist && hasLineOfSight(x, 0.9, z, w.x, 0.9, w.z, [])) {
+    } else if (d2 < fallbackDist && hasLineOfSight(x, probeY, z, w.x, probeY, w.z, [])) {
       fallbackDist = d2;
       fallbackVisId = w.id;
     }
@@ -352,16 +354,24 @@ function pickStartWaypointId(x: number, z: number): string {
   return bestVisId ?? fallbackVisId ?? findNearestWaypoint(x, z).id;
 }
 
-function pickBestUnstuckDir(botX: number, botZ: number, moveDx: number, moveDz: number, fallback: number): number {
+function pickBestUnstuckDir(
+  botX: number,
+  botY: number,
+  botZ: number,
+  moveDx: number,
+  moveDz: number,
+  fallback: number
+): number {
   const len = Math.hypot(moveDx, moveDz) || 1;
   const fx = moveDx / len;
   const fz = moveDz / len;
   const lx = -fz;
   const lz = fx;
+  const probeY = botY + 0.85;
 
   const probe = (sx: number, sz: number): number => {
     const dLen = Math.hypot(sx, sz) || 1;
-    const hit = raycastMapBoxes(botX, 0.85, botZ, sx / dLen, 0, sz / dLen, 3.2);
+    const hit = raycastMapBoxes(botX, probeY, botZ, sx / dLen, 0, sz / dLen, 3.2);
     return hit ? hit.distance : 3.2;
   };
 
@@ -583,7 +593,7 @@ export function stepBotBrain(params: {
       }
     }
     if (nearestEnemy) {
-      goalId = pickStartWaypointId(nearestEnemy.x, nearestEnemy.z);
+      goalId = pickStartWaypointId(nearestEnemy.x, nearestEnemy.z, nearestEnemy.y);
     } else {
       goalId = 'mid_center';
     }
@@ -591,7 +601,7 @@ export function stepBotBrain(params: {
     if (bomb.status === 'planted' && bomb.site) {
       goalId = bomb.site === 'A' ? 'a_site' : 'b_site';
     } else if (bomb.status === 'dropped' && !bot.hasC4) {
-      goalId = pickStartWaypointId(bomb.x, bomb.z);
+      goalId = pickStartWaypointId(bomb.x, bomb.z, bomb.y);
     } else if (bot.hasC4) {
       const onSite = getPlantSiteAt(bot.x, bot.z);
       if (onSite && !visionHit && brain.reloadTimer <= 0) {
@@ -611,7 +621,12 @@ export function stepBotBrain(params: {
     if ((bomb.status === 'planted' || bomb.status === 'defusing') && bomb.site) {
       goalId = bomb.site === 'A' ? 'a_site' : 'b_site';
       const distToBomb = Math.hypot(bomb.x - bot.x, bomb.z - bot.z);
-      if (distToBomb < 2.35 && !visionHit && brain.reloadTimer <= 0) {
+      if (
+        (bomb.status === 'planted' || bomb.defuserId === bot.id) &&
+        distToBomb < 2.35 &&
+        !visionHit &&
+        brain.reloadTimer <= 0
+      ) {
         wantDefuse = true;
       }
     } else {
@@ -626,7 +641,7 @@ export function stepBotBrain(params: {
   }
 
   if (goalId !== brain.lastGoalId || brain.path.length === 0) {
-    const startId = pickStartWaypointId(bot.x, bot.z);
+    const startId = pickStartWaypointId(bot.x, bot.z, bot.y);
     brain.path = findWaypointPath(startId, goalId);
     brain.pathIndex = 0;
     brain.lastGoalId = goalId;
@@ -644,7 +659,7 @@ export function stepBotBrain(params: {
 
     const dx = visibleEnemy.x - bot.x;
     const dz = visibleEnemy.z - bot.z;
-    const eyeY = bot.y + (bot.crouching ? 1.08 : 1.55);
+    const eyeY = bot.y + (bot.crouching ? 1.08 : 1.62);
     const dy = visionHit.aimY - eyeY;
     const horizDist = Math.max(0.1, Math.hypot(dx, dz));
 
@@ -737,7 +752,11 @@ export function stepBotBrain(params: {
     bot.team === 'defenders'
   ) {
     const distBomb = Math.hypot(bomb.x - bot.x, bomb.z - bot.z);
-    if (distBomb < 6.5 && hasLineOfSight(bot.x, 0.9, bot.z, bomb.x, 0.5, bomb.z, [])) {
+    const atFinalWp = brain.pathIndex >= Math.max(0, brain.path.length - 1);
+    if (
+      (distBomb < 8.5 && hasLineOfSight(bot.x, bot.y + 0.9, bot.z, bomb.x, bomb.y + 0.5, bomb.z, [])) ||
+      (distBomb < 8.5 && atFinalWp && distBomb > 1.8)
+    ) {
       targetX = bomb.x;
       targetZ = bomb.z;
     }
@@ -780,16 +799,24 @@ export function stepBotBrain(params: {
     brain.lastX = bot.x;
     brain.lastZ = bot.z;
 
+    const stayAtSite =
+      (bot.hasC4 && Boolean(getPlantSiteAt(bot.x, bot.z))) ||
+      (bot.team === 'defenders' &&
+        (bomb.status === 'planted' || bomb.status === 'defusing') &&
+        Math.hypot(bomb.x - bot.x, bomb.z - bot.z) < 8.5);
+
     if (brain.holdTimer > 3.8) {
       brain.holdTimer = 0;
-      const curWp = WAYPOINT_MAP.get(brain.path[Math.min(brain.pathIndex, brain.path.length - 1)]);
-      if (curWp && curWp.neighbors.length > 0) {
-        const nextChoice = curWp.neighbors[Math.floor(Math.random() * curWp.neighbors.length)];
-        brain.path = [nextChoice];
-        brain.pathIndex = 0;
-      } else {
-        brain.targetSite = brain.targetSite === 'A' ? 'B' : 'A';
-        brain.lastGoalId = '';
+      if (!stayAtSite) {
+        const curWp = WAYPOINT_MAP.get(brain.path[Math.min(brain.pathIndex, brain.path.length - 1)]);
+        if (curWp && curWp.neighbors.length > 0) {
+          const nextChoice = curWp.neighbors[Math.floor(Math.random() * curWp.neighbors.length)];
+          brain.path = [nextChoice];
+          brain.pathIndex = 0;
+        } else {
+          brain.targetSite = brain.targetSite === 'A' ? 'B' : 'A';
+          brain.lastGoalId = '';
+        }
       }
     }
 
@@ -827,13 +854,27 @@ export function stepBotBrain(params: {
       brain.stuckTimer = 0;
       brain.stuckSkipCount++;
       brain.unstuckTimer = 0.85;
-      brain.unstuckDir = pickBestUnstuckDir(bot.x, bot.z, moveDx, moveDz, brain.unstuckDir);
+      brain.unstuckDir = pickBestUnstuckDir(bot.x, bot.y, bot.z, moveDx, moveDz, brain.unstuckDir);
 
       if (brain.stuckSkipCount >= 2 && brain.pathIndex < brain.path.length - 1) {
         brain.pathIndex++;
         brain.stuckSkipCount = 0;
+      } else if (brain.stuckSkipCount >= 3) {
+        brain.stuckSkipCount = 0;
+        brain.unstuckDir *= -1;
+        brain.unstuckTimer = 1.25;
+        if (
+          !isFfa &&
+          !isAwpOnly &&
+          bomb.status !== 'planted' &&
+          bomb.status !== 'defusing' &&
+          !bot.hasC4
+        ) {
+          brain.targetSite = brain.targetSite === 'A' ? 'B' : 'A';
+          brain.lastGoalId = '';
+        }
       } else {
-        const startId = pickStartWaypointId(bot.x, bot.z);
+        const startId = pickStartWaypointId(bot.x, bot.z, bot.y);
         brain.path = findWaypointPath(startId, goalId);
         const firstWp = WAYPOINT_MAP.get(brain.path[0]);
         brain.pathIndex =

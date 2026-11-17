@@ -4,6 +4,7 @@ import {
   customMapToDefinition,
   validateCustomMapJson,
 } from '../game/customMaps';
+import type { SavedCustomMapEntry } from '../game/customMapStore';
 import type { MatchConfig } from '../game/engine';
 import { MAP_LIST, registerCustomMap } from '../game/mapData';
 import { getDefaultWebSocketUrl, networkClient } from '../game/network';
@@ -37,6 +38,12 @@ interface MainMenuProps {
   onChangeCrosshair: (next: CrosshairConfig) => void;
   onStartMatch: (config: MatchConfig) => void;
   onPreviewMap: (mapId: MapId, customMapData?: CustomMapJson | null) => void;
+  savedCustomMaps: SavedCustomMapEntry[];
+  activeCustomMapId: string | null;
+  preferredCustomSyncStamp: number;
+  onSelectSavedCustomMap: (entry: SavedCustomMapEntry) => void;
+  onSaveImportedCustomMap: (map: CustomMapJson) => SavedCustomMapEntry;
+  onOpenMapEditor: (map?: CustomMapJson | null) => void;
 }
 
 function getDifficultyLabel(val: number): string {
@@ -53,11 +60,19 @@ export function MainMenu({
   onChangeCrosshair,
   onStartMatch,
   onPreviewMap,
+  savedCustomMaps,
+  activeCustomMapId,
+  preferredCustomSyncStamp,
+  onSelectSavedCustomMap,
+  onSaveImportedCustomMap,
+  onOpenMapEditor,
 }: MainMenuProps) {
+  const initialSavedEntry =
+    savedCustomMaps.find((m) => m.id === activeCustomMapId) ?? savedCustomMaps[0] ?? null;
   const [mode, setMode] = useState<GameMode>('bots');
   const [lobbyStyle, setLobbyStyle] = useState<'solo' | 'multiplayer'>('solo');
-  const [mapId, setMapId] = useState<MapId>('sandline');
-  const [customMap, setCustomMap] = useState<CustomMapJson | null>(null);
+  const [mapId, setMapId] = useState<MapId>(preferredCustomSyncStamp > 0 && initialSavedEntry ? 'custom' : 'sandline');
+  const [customMap, setCustomMap] = useState<CustomMapJson | null>(initialSavedEntry?.data ?? null);
   const [playerName, setPlayerName] = useState<string>(loadSavedPlayerName);
   const [playerTeam, setPlayerTeam] = useState<Team>('attackers');
   const [difficulty, setDifficulty] = useState<BotDifficulty>(55);
@@ -121,6 +136,21 @@ export function MainMenu({
         setMapId(r.mapId);
         onPreviewMap(r.mapId, syncedCustom);
         setLobbyError(null);
+        if (r.started) {
+          const me = r.players.find((p) => p.id === (id ?? networkClient.clientId));
+          onStartMatch({
+            mode: r.mode,
+            mapId: r.mapId,
+            customMapData: syncedCustom ?? r.customMapData ?? customMap,
+            playerTeam: me?.team ?? playerTeam,
+            playerName: me?.name ?? playerName,
+            difficulty: r.botDifficulty,
+            maxRounds,
+            legacyBots,
+            room: r,
+            localClientId: id ?? networkClient.clientId,
+          });
+        }
       },
       onRoomUpdate: (r) => setRoom(r),
       onRoomError: (err) => setLobbyError(err),
@@ -164,6 +194,17 @@ export function MainMenu({
         });
       },
     });
+    return () => {
+      networkClient.clearCallbacks([
+        'onStatusChange',
+        'onWelcome',
+        'onRoomJoined',
+        'onRoomUpdate',
+        'onRoomError',
+        'onMatchStarted',
+        'onSessionRestored',
+      ]);
+    };
   }, [customMap, legacyBots, maxRounds, onPreviewMap, onStartMatch, playerName, playerTeam, yourId]);
 
   const isOfflineStartMode =
@@ -216,6 +257,21 @@ export function MainMenu({
       networkClient.connect(target);
     }
   }, [isOfflineStartMode]);
+
+  const lastSyncStampRef = useRef(preferredCustomSyncStamp);
+  useEffect(() => {
+    const matching =
+      savedCustomMaps.find((m) => m.id === activeCustomMapId) ?? savedCustomMaps[0] ?? null;
+    if (matching) {
+      setCustomMap(matching.data);
+      registerCustomMap(customMapToDefinition(matching.data));
+      if (preferredCustomSyncStamp > lastSyncStampRef.current) {
+        lastSyncStampRef.current = preferredCustomSyncStamp;
+        setMapId('custom');
+        onPreviewMap('custom', matching.data);
+      }
+    }
+  }, [activeCustomMapId, onPreviewMap, preferredCustomSyncStamp, savedCustomMaps]);
 
   const handleSelectMode = (nextMode: GameMode) => {
     setMode(nextMode);
@@ -324,11 +380,12 @@ export function MainMenu({
       setCustomMapError(res.error);
       return;
     }
-    const def = customMapToDefinition(res.data);
+    const saved = onSaveImportedCustomMap(res.data);
+    const def = customMapToDefinition(saved.data);
     registerCustomMap(def);
-    setCustomMap(res.data);
+    setCustomMap(saved.data);
     setMapId('custom');
-    onPreviewMap('custom', res.data);
+    onPreviewMap('custom', saved.data);
     setShowCustomMapModal(false);
   };
 
@@ -417,21 +474,28 @@ export function MainMenu({
               </div>
             </div>
 
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => onOpenMapEditor(customMap)}
+                className="px-2.5 py-1.5 rounded text-[11px] font-bold bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-400/40 transition-colors whitespace-nowrap"
+              >
+                Map Editor
+              </button>
               <button
                 type="button"
                 onClick={() => {
                   setCustomMapError(null);
                   setShowCustomMapModal(true);
                 }}
-                className="px-2.5 py-1.5 rounded text-[11px] font-semibold bg-[#0b0e14] hover:bg-white/10 text-slate-200 border border-white/15 transition-colors whitespace-nowrap"
+                className="px-2 py-1.5 rounded text-[11px] font-semibold bg-[#0b0e14] hover:bg-white/10 text-slate-200 border border-white/15 transition-colors whitespace-nowrap"
               >
-                Custom Maps
+                JSON
               </button>
               <button
                 type="button"
                 onClick={() => setShowCrosshairModal(true)}
-                className="px-2.5 py-1.5 rounded text-[11px] font-semibold bg-[#0b0e14] hover:bg-white/10 text-emerald-300 border border-white/15 transition-colors whitespace-nowrap"
+                className="px-2 py-1.5 rounded text-[11px] font-semibold bg-[#0b0e14] hover:bg-white/10 text-emerald-300 border border-white/15 transition-colors whitespace-nowrap"
               >
                 Crosshair
               </button>
@@ -524,6 +588,37 @@ export function MainMenu({
                 </button>
               ))}
             </div>
+            {savedCustomMaps.length > 0 && !room && (
+              <div className="mt-1.5 flex items-center gap-1.5">
+                <select
+                  aria-label="Select Saved Custom Map"
+                  value={activeCustomMapId ?? savedCustomMaps[0]?.id ?? ''}
+                  onChange={(e) => {
+                    const entry = savedCustomMaps.find((s) => s.id === e.target.value);
+                    if (!entry) return;
+                    onSelectSavedCustomMap(entry);
+                    registerCustomMap(customMapToDefinition(entry.data));
+                    setCustomMap(entry.data);
+                    setMapId('custom');
+                    onPreviewMap('custom', entry.data);
+                  }}
+                  className="flex-1 px-2 py-1 text-[11px] bg-[#0b0e14] border border-white/15 rounded text-slate-200 focus:outline-none focus:border-amber-400"
+                >
+                  {savedCustomMaps.map((entry) => (
+                    <option key={entry.id} value={entry.id}>
+                      Custom: {entry.data.mapName} ({(entry.byteSize / 1024).toFixed(1)} KB)
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => onOpenMapEditor(customMap)}
+                  className="px-2.5 py-1 text-[11px] font-semibold rounded bg-indigo-600/80 hover:bg-indigo-500 text-white whitespace-nowrap"
+                >
+                  Edit
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Player Name & Team Row */}
@@ -960,6 +1055,16 @@ export function MainMenu({
             </div>
 
             <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCustomMapModal(false);
+                  onOpenMapEditor(customMap);
+                }}
+                className="px-3.5 py-2 rounded text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+              >
+                Open 3D Map Editor & Blender
+              </button>
               <button
                 type="button"
                 onClick={handleDownloadTemplate}

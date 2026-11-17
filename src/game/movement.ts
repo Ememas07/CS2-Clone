@@ -275,6 +275,9 @@ export function stepKrunkerMovement(
     if (colResult.grounded && state.vy < 0) {
       state.vy = 0;
     }
+    if (colResult.hitCeiling && state.vy > 0) {
+      state.vy = 0;
+    }
   }
 
   state.grounded = colResult.grounded;

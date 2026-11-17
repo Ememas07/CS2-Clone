@@ -30,6 +30,7 @@ export interface NetworkCallbacks {
   onShoot?: (
     senderId: string,
     payload: {
+      shooterId?: string;
       ox: number;
       oy: number;
       oz: number;
@@ -45,6 +46,7 @@ export interface NetworkCallbacks {
   onGrenadeEvent?: (
     senderId: string,
     payload: {
+      ownerId?: string;
       grenadeId: GrenadeId;
       ox: number;
       oy: number;
@@ -57,6 +59,7 @@ export interface NetworkCallbacks {
   onHitClaim?: (
     senderId: string,
     payload: {
+      shooterId?: string;
       targetId: string;
       damage: number;
       armorDamage: number;
@@ -142,6 +145,12 @@ export class TacticalNetworkClient {
     this.callbacks = { ...this.callbacks, ...cb };
   }
 
+  public clearCallbacks(keys: Array<keyof NetworkCallbacks>): void {
+    for (const key of keys) {
+      delete this.callbacks[key];
+    }
+  }
+
   public connect(url?: string): void {
     const targetUrl =
       url !== undefined
@@ -172,6 +181,7 @@ export class TacticalNetworkClient {
       this.ws = ws;
 
       ws.onopen = () => {
+        if (this.ws !== ws) return;
         this.reconnectAttempts = 0;
         this.lastMessageTime = Date.now();
         this.callbacks.onStatusChange?.('connected');
@@ -202,6 +212,7 @@ export class TacticalNetworkClient {
       };
 
       ws.onmessage = (evt) => {
+        if (this.ws !== ws) return;
         this.lastMessageTime = Date.now();
         let msg: Record<string, unknown>;
         try {
@@ -264,6 +275,7 @@ export class TacticalNetworkClient {
             this.callbacks.onShoot?.(
               senderId,
               msg.payload as {
+                shooterId?: string;
                 ox: number;
                 oy: number;
                 oz: number;
@@ -285,6 +297,7 @@ export class TacticalNetworkClient {
             this.callbacks.onGrenadeEvent?.(
               senderId,
               msg.payload as {
+                ownerId?: string;
                 grenadeId: GrenadeId;
                 ox: number;
                 oy: number;
@@ -299,6 +312,7 @@ export class TacticalNetworkClient {
             this.callbacks.onHitClaim?.(
               senderId,
               msg.payload as {
+                shooterId?: string;
                 targetId: string;
                 damage: number;
                 armorDamage: number;
@@ -312,6 +326,7 @@ export class TacticalNetworkClient {
       };
 
       ws.onerror = () => {
+        if (this.ws !== ws) return;
         this.stopHeartbeat();
         this.callbacks.onStatusChange?.(
           'disconnected',
@@ -321,6 +336,8 @@ export class TacticalNetworkClient {
       };
 
       ws.onclose = (evt) => {
+        if (this.ws !== ws) return;
+        this.ws = null;
         this.stopHeartbeat();
         const reason = evt.reason ? ` (${evt.reason})` : '';
         const wasClean = evt.wasClean
@@ -391,6 +408,7 @@ export class TacticalNetworkClient {
       this.reconnectTimer = null;
     }
     this.reconnectAttempts = 0;
+    this.pendingQueue = [];
     if (this.ws) {
       try {
         this.ws.onopen = null;

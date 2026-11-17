@@ -38,8 +38,13 @@ export interface CrosshairConfig {
 }
 
 export type CustomSkyTheme = 'desert' | 'twilight' | 'urban' | 'arctic' | 'sunset';
-export type CustomMaterialInput = 'sandstone' | 'concrete' | 'wood' | 'metal' | 'crate';
+export type CustomMaterialInput = 'sandstone' | 'sand' | 'concrete' | 'wood' | 'metal' | 'crate';
 export type RampDirection = 'n' | 's' | 'e' | 'w';
+
+export interface CustomMapMeshData {
+  positions: number[];
+  indices?: number[];
+}
 
 export interface CustomMapBlockInput {
   id?: string;
@@ -47,6 +52,11 @@ export interface CustomMapBlockInput {
   size: [number, number, number];
   material: CustomMaterialInput;
   wallbangable?: boolean;
+  rotation?: [number, number, number];
+  color?: string;
+  noCollision?: boolean;
+  colliders?: Array<[number, number, number, number, number, number]>;
+  mesh?: CustomMapMeshData;
 }
 
 export interface CustomMapRampInput {
@@ -55,11 +65,17 @@ export interface CustomMapRampInput {
   size: [number, number, number];
   direction: RampDirection;
   material?: CustomMaterialInput;
+  color?: string;
 }
 
 export interface CustomMapSpawnInput {
   position: [number, number, number];
   yaw?: number;
+}
+
+export interface CustomMapBuyZoneInput {
+  position: [number, number];
+  radius?: number;
 }
 
 export interface CustomMapWaypointInput {
@@ -80,6 +96,10 @@ export interface CustomMapJson {
   bombSites: {
     A: { position: [number, number]; radius?: number };
     B: { position: [number, number]; radius?: number };
+  };
+  buyZones?: {
+    attackers?: CustomMapBuyZoneInput;
+    defenders?: CustomMapBuyZoneInput;
   };
   botWaypoints?: CustomMapWaypointInput[];
 }
@@ -227,6 +247,7 @@ export interface HudSnapshot {
   mode: GameMode;
   mapId: MapId;
   customMapName?: string | null;
+  isTestPlay?: boolean;
   roundNumber: number;
   maxRounds: number;
   halftimeRound: number;

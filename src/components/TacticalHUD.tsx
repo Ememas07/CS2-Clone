@@ -15,6 +15,7 @@ interface TacticalHUDProps {
   onToggleXray: () => void;
   onToggleFullscreen: () => void;
   onPause: () => void;
+  onReturnToEditor?: () => void;
 }
 
 function formatTimer(seconds: number): string {
@@ -35,6 +36,7 @@ export function TacticalHUD({
   onToggleXray,
   onToggleFullscreen,
   onPause,
+  onReturnToEditor,
 }: TacticalHUDProps) {
   const radarRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -60,8 +62,10 @@ export function TacticalHUD({
     const mapD = bounds.maxZ - bounds.minZ;
     const pad = 8;
     const scale = Math.min((w - pad * 2) / mapW, (h - pad * 2) / mapD);
-    const offsetX = w * 0.5;
-    const offsetY = h * 0.5;
+    const centerX = (bounds.minX + bounds.maxX) * 0.5;
+    const centerZ = (bounds.minZ + bounds.maxZ) * 0.5;
+    const offsetX = w * 0.5 - centerX * scale;
+    const offsetY = h * 0.5 - centerZ * scale;
 
     const toRadar = (wx: number, wz: number): [number, number] => [
       offsetX + wx * scale,
@@ -278,13 +282,13 @@ export function TacticalHUD({
             className="fixed inset-0"
             style={{
               background:
-                'radial-gradient(circle at center, transparent 34%, rgba(4,6,10,0.96) 36%)',
+                'radial-gradient(circle min(36vw, 36vh) at center, transparent 94%, rgba(4,6,10,0.96) 100%)',
             }}
           />
           <div className="fixed left-0 right-0 top-1/2 h-px bg-black/90" />
           <div className="fixed top-0 bottom-0 left-1/2 w-px bg-black/90" />
           <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-red-500" />
-          <span className="relative mt-44 px-2 py-0.5 rounded bg-black/80 text-xs font-tactical-mono text-amber-300">
+          <span className="fixed left-1/2 top-[calc(50%+min(26vh,11rem))] -translate-x-1/2 px-2 py-0.5 rounded bg-black/80 text-xs font-tactical-mono text-amber-300">
             {hud.scopeZoom === 2 ? '4.0x ZOOM' : '2.0x ZOOM'}
           </span>
         </div>
@@ -314,36 +318,6 @@ export function TacticalHUD({
             <line x1="4" y1="22" x2="10" y2="16" stroke="currentColor" strokeWidth="2.2" />
             <line x1="22" y1="22" x2="16" y2="16" stroke="currentColor" strokeWidth="2.2" />
           </svg>
-        </div>
-      )}
-
-      {/* Kill Confirmation Feedback */}
-      {hud.killConfirm && (
-        <div
-          key={hud.killConfirm.id}
-          className="fixed left-1/2 bottom-44 -translate-x-1/2 pointer-events-none flex items-center gap-2.5 px-4 py-1.5 rounded bg-[#0b0e14]/92 border shadow-xl"
-          style={{
-            borderColor: hud.killConfirm.headshot ? 'rgba(244,63,94,0.85)' : 'rgba(245,158,11,0.75)',
-          }}
-        >
-          <span
-            className={`inline-flex items-center justify-center w-5 h-5 rounded-sm text-[11px] font-black ${
-              hud.killConfirm.headshot
-                ? 'bg-rose-500 text-white'
-                : 'bg-amber-400 text-slate-950'
-            }`}
-          >
-            {hud.killConfirm.headshot ? 'HS' : '✕'}
-          </span>
-          <div className="text-xs font-bold uppercase tracking-wider text-white">
-            {hud.killConfirm.headshot ? 'Headshot Elimination' : 'Eliminated'}{' '}
-            <span className="text-amber-300">{hud.killConfirm.victimName}</span>
-          </div>
-          {!isFfa && hud.mode !== 'awp' && (
-            <span className="text-xs font-tactical-mono font-bold text-emerald-400">
-              +${hud.killConfirm.reward}
-            </span>
-          )}
         </div>
       )}
 
@@ -471,15 +445,15 @@ export function TacticalHUD({
         </div>
 
         {/* Top-Right: Mute / Pause + Kill Feed */}
-        <div className="flex flex-col items-end gap-2 min-w-[240px]">
-          <div className="flex items-center gap-1.5 pointer-events-auto" data-ui-interactive="true">
+        <div className="flex flex-col items-end gap-2 min-w-0 max-w-[42vw]">
+          <div className="flex flex-wrap justify-end items-center gap-1.5 pointer-events-auto" data-ui-interactive="true">
             {hud.mode === 'spectate' && (
               <button
                 type="button"
                 tabIndex={-1}
                 aria-label="Toggle spectator X-Ray"
                 onClick={onToggleXray}
-                className={`px-2.5 py-1 text-xs font-semibold border rounded transition-colors ${
+                className={`px-2.5 py-1 text-xs font-semibold border rounded transition-colors whitespace-nowrap ${
                   hud.xrayEnabled
                     ? 'bg-sky-600/90 hover:bg-sky-500 text-white border-sky-300/40'
                     : 'bg-[#0b0e14]/88 hover:bg-slate-800 text-slate-300 border-white/15'
@@ -493,7 +467,7 @@ export function TacticalHUD({
               tabIndex={-1}
               aria-label={hud.muted ? 'Unmute audio' : 'Mute audio'}
               onClick={onToggleMute}
-              className="px-2.5 py-1 text-xs font-semibold bg-[#0b0e14]/88 hover:bg-slate-800 text-slate-200 border border-white/15 rounded"
+              className="px-2.5 py-1 text-xs font-semibold bg-[#0b0e14]/88 hover:bg-slate-800 text-slate-200 border border-white/15 rounded whitespace-nowrap"
             >
               {hud.muted ? 'Muted [M]' : 'Audio [M]'}
             </button>
@@ -502,7 +476,7 @@ export function TacticalHUD({
               tabIndex={-1}
               aria-label="Toggle fullscreen keyboard lock"
               onClick={onToggleFullscreen}
-              className="px-2.5 py-1 text-xs font-semibold bg-[#0b0e14]/88 hover:bg-slate-800 text-slate-200 border border-white/15 rounded"
+              className="px-2.5 py-1 text-xs font-semibold bg-[#0b0e14]/88 hover:bg-slate-800 text-slate-200 border border-white/15 rounded whitespace-nowrap"
             >
               Lock Keys
             </button>
@@ -511,10 +485,21 @@ export function TacticalHUD({
               tabIndex={-1}
               aria-label="Pause match"
               onClick={onPause}
-              className="px-2.5 py-1 text-xs font-semibold bg-[#0b0e14]/88 hover:bg-slate-800 text-slate-200 border border-white/15 rounded"
+              className="px-2.5 py-1 text-xs font-semibold bg-[#0b0e14]/88 hover:bg-slate-800 text-slate-200 border border-white/15 rounded whitespace-nowrap"
             >
               Pause [Esc]
             </button>
+            {hud.isTestPlay && onReturnToEditor && (
+              <button
+                type="button"
+                tabIndex={-1}
+                aria-label="Return to Map Editor"
+                onClick={onReturnToEditor}
+                className="px-2.5 py-1 text-xs font-bold bg-indigo-600/95 hover:bg-indigo-500 text-white border border-indigo-300/40 rounded whitespace-nowrap"
+              >
+                Editor [F2]
+              </button>
+            )}
           </div>
 
           <div className="flex flex-col items-end gap-1">
@@ -564,6 +549,35 @@ export function TacticalHUD({
 
       {/* Center-Bottom Context Prompts: Interact / Bomb Progress / Click to Lock Pointer */}
       <div className="fixed left-1/2 bottom-28 -translate-x-1/2 flex flex-col items-center gap-2">
+        {hud.killConfirm && (
+          <div
+            key={hud.killConfirm.id}
+            className="pointer-events-none flex items-center gap-2.5 px-4 py-1.5 rounded bg-[#0b0e14]/92 border shadow-xl"
+            style={{
+              borderColor: hud.killConfirm.headshot ? 'rgba(244,63,94,0.85)' : 'rgba(245,158,11,0.75)',
+            }}
+          >
+            <span
+              className={`inline-flex items-center justify-center w-5 h-5 rounded-sm text-[11px] font-black ${
+                hud.killConfirm.headshot
+                  ? 'bg-rose-500 text-white'
+                  : 'bg-amber-400 text-slate-950'
+              }`}
+            >
+              {hud.killConfirm.headshot ? 'HS' : '✕'}
+            </span>
+            <div className="text-xs font-bold uppercase tracking-wider text-white whitespace-nowrap">
+              {hud.killConfirm.headshot ? 'Headshot Elimination' : 'Eliminated'}{' '}
+              <span className="text-amber-300">{hud.killConfirm.victimName}</span>
+            </div>
+            {!isFfa && hud.mode !== 'awp' && (
+              <span className="text-xs font-tactical-mono font-bold text-emerald-400">
+                +${hud.killConfirm.reward}
+              </span>
+            )}
+          </div>
+        )}
+
         {hud.bomb.status === 'planting' && (
           <div className="w-60 bg-[#0b0e14]/92 border border-amber-400/50 rounded p-2 text-center">
             <div className="text-xs font-bold text-amber-300 uppercase mb-1">
@@ -835,7 +849,7 @@ export function TacticalHUD({
           </div>
 
           {/* Slots 1-5 */}
-          <div className="flex items-center gap-1.5 pointer-events-auto" data-ui-interactive="true">
+          <div className="flex flex-wrap justify-end items-center gap-1.5 pointer-events-auto" data-ui-interactive="true">
             {(
               [
                 {
@@ -882,7 +896,7 @@ export function TacticalHUD({
                   tabIndex={-1}
                   disabled={!item.active}
                   onClick={() => onSelectSlot(item.slot)}
-                  className={`px-2.5 py-1.5 rounded border text-xs transition-colors ${
+                  className={`px-2.5 py-1.5 rounded border text-xs transition-colors whitespace-nowrap ${
                     selected
                       ? 'bg-amber-500/90 text-slate-950 border-amber-300 font-bold'
                       : item.active
@@ -903,7 +917,10 @@ export function TacticalHUD({
 
       {/* Tab Scoreboard Overlay */}
       {showScoreboard && (
-        <div className="fixed inset-0 z-30 flex items-center justify-center p-6 bg-black/55">
+        <div
+          data-ui-interactive="true"
+          className="fixed inset-0 z-30 flex items-center justify-center p-6 bg-black/55"
+        >
           <div className="w-full max-w-3xl bg-[#11151d]/96 border border-white/15 rounded-lg p-5 shadow-2xl">
             <div className="flex items-center justify-between border-b border-white/10 pb-3 mb-4">
               <div>

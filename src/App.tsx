@@ -1,10 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BuyMenu } from './components/BuyMenu';
 import { MainMenu } from './components/MainMenu';
+import { type EditorHistoryState, MapEditor } from './components/MapEditor';
 import { StatusModal } from './components/StatusModal';
 import { TacticalHUD } from './components/TacticalHUD';
 import { loadCrosshairConfig, saveCrosshairConfig } from './game/crosshair';
+import {
+  compactCustomMapJson,
+  createCustomMapTemplate,
+  customMapToDefinition,
+} from './game/customMaps';
+import {
+  deleteCustomMapEntry,
+  loadSavedCustomMaps,
+  renameCustomMapEntry,
+  resolveActiveCustomMap,
+  type SavedCustomMapEntry,
+  saveCustomMapEntry,
+  setActiveCustomMapId,
+} from './game/customMapStore';
 import { GameEngine, type MatchConfig } from './game/engine';
+import { registerCustomMap } from './game/mapData';
 import { networkClient } from './game/network';
 import { ROUND_CONSTANTS } from './game/rules';
 import type {
@@ -21,12 +37,25 @@ function loadInitialSensitivity(): number {
     const raw = window.localStorage.getItem('sandline_sensitivity');
     const parsed = raw ? Number.parseFloat(raw) : Number.NaN;
     if (Number.isFinite(parsed)) {
-      return Math.max(0.2, Math.min(3.0, parsed));
+      return Math.max(0.2, Math.min(3.0, Math.round(parsed * 100) / 100));
     }
   } catch {
     // Ignore storage access errors
   }
   return 1.0;
+}
+
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (tag === 'INPUT') {
+    const inputType = (el as HTMLInputElement).type?.toLowerCase() ?? 'text';
+    return !['range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'color'].includes(inputType);
+  }
+  return false;
 }
 
 export default function App() {
@@ -48,6 +77,27 @@ export default function App() {
   const [sensitivity, setSensitivity] = useState<number>(loadInitialSensitivity);
   const [crosshairConfig, setCrosshairConfig] = useState<CrosshairConfig>(loadCrosshairConfig);
   const initialSensitivityRef = useRef(sensitivity);
+
+  const initialSavedRef = useRef<SavedCustomMapEntry[] | null>(null);
+  if (!initialSavedRef.current) {
+    initialSavedRef.current = loadSavedCustomMaps();
+  }
+  const [savedCustomMaps, setSavedCustomMaps] = useState<SavedCustomMapEntry[]>(
+    initialSavedRef.current
+  );
+  const [activeCustomMapId, setActiveSavedIdState] = useState<string | null>(
+    () => resolveActiveCustomMap(initialSavedRef.current!)?.id ?? null
+  );
+  const [preferredCustomSyncStamp, setPreferredCustomSyncStamp] = useState(0);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorHistory, setEditorHistory] = useState<EditorHistoryState>(() => {
+    const resolved = resolveActiveCustomMap(initialSavedRef.current!);
+    return {
+      draft: resolved ? structuredClone(resolved.data) : compactCustomMapJson(createCustomMapTemplate()),
+      undoStack: [],
+      redoStack: [],
+    };
+  });
 
   const handleStartMatch = useCallback((cfg: MatchConfig) => {
     lastConfigRef.current = cfg;
@@ -104,12 +154,125 @@ export default function App() {
     } catch {}
   }, []);
 
-  // Global HUD/Menu hotkeys: B (Buy Menu), F3 (Rebuy), Escape (Pause or close Buy Menu), M (Mute), Tab (Scoreboard)
+  const handleReturnToEditor = useCallback(() => {
+    setBuyMenuOpen(false);
+    setShowScoreboard(false);
+    engineRef.current?.exitPointerLock();
+    engineRef.current?.setScreen('title');
+    engineRef.current?.setSuspended(true);
+    setEditorOpen(true);
+  }, []);
+
+  const handleOpenMapEditor = useCallback((initialMap?: CustomMapJson | null) => {
+    if (initialMap) {
+      setEditorHistory({
+        draft: structuredClone(initialMap),
+        undoStack: [],
+        redoStack: [],
+      });
+    }
+    engineRef.current?.setSuspended(true);
+    setEditorOpen(true);
+  }, []);
+
+  const handleSelectSavedCustomMap = useCallback((entry: SavedCustomMapEntry) => {
+    setActiveCustomMapId(entry.id);
+    setActiveSavedIdState(entry.id);
+    registerCustomMap(customMapToDefinition(entry.data));
+    setEditorHistory({
+      draft: structuredClone(entry.data),
+      undoStack: [],
+      redoStack: [],
+    });
+  }, []);
+
+  const handleSaveToLibrary = useCallback(
+    (map: CustomMapJson, asNew = false): SavedCustomMapEntry | null => {
+      const { entries, saved } = saveCustomMapEntry(map, asNew ? undefined : activeCustomMapId);
+      setSavedCustomMaps(entries);
+      setActiveSavedIdState(saved.id);
+      registerCustomMap(customMapToDefinition(saved.data));
+      return saved;
+    },
+    [activeCustomMapId]
+  );
+
+  const handleRenameSavedMap = useCallback((id: string, nextName: string) => {
+    const entries = renameCustomMapEntry(id, nextName);
+    setSavedCustomMaps(entries);
+  }, []);
+
+  const handleDeleteSavedMap = useCallback(
+    (id: string) => {
+      const entries = deleteCustomMapEntry(id);
+      setSavedCustomMaps(entries);
+      if (activeCustomMapId === id) {
+        const nextActive = entries[0] ?? null;
+        setActiveSavedIdState(nextActive?.id ?? null);
+        if (nextActive) {
+          setEditorHistory({
+            draft: structuredClone(nextActive.data),
+            undoStack: [],
+            redoStack: [],
+          });
+        }
+      }
+    },
+    [activeCustomMapId]
+  );
+
+  const handleTestPlayCustomMap = useCallback(
+    (map: CustomMapJson, withBots: boolean) => {
+      registerCustomMap(customMapToDefinition(map));
+      setEditorOpen(false);
+      engineRef.current?.setSuspended(false);
+      const cfg: MatchConfig = {
+        mode: 'bots',
+        mapId: 'custom',
+        customMapData: map,
+        playerTeam: 'attackers',
+        playerName: 'Builder',
+        difficulty: 55,
+        maxRounds: ROUND_CONSTANTS.DEFAULT_MAX_ROUNDS,
+        isTestPlay: true,
+        testPlayBots: withBots,
+      };
+      lastConfigRef.current = cfg;
+      setBuyMenuOpen(false);
+      setShowScoreboard(false);
+      engineRef.current?.startMatch(cfg);
+      try {
+        engineRef.current?.requestPointerLock();
+      } catch {}
+    },
+    []
+  );
+
+  const handleFinishEditorToMenu = useCallback((map: CustomMapJson) => {
+    registerCustomMap(customMapToDefinition(map));
+    setEditorOpen(false);
+    setPreferredCustomSyncStamp((n) => n + 1);
+    engineRef.current?.setSuspended(false);
+    engineRef.current?.loadMap('custom', map);
+  }, []);
+
+  const handleExitEditorWithoutSave = useCallback(() => {
+    setEditorOpen(false);
+    engineRef.current?.setSuspended(false);
+  }, []);
+
+  // Global HUD/Menu hotkeys: B (Buy Menu), F2 (Return to Map Editor during Test Play), F3 (Rebuy), Escape (Pause or close Buy Menu), M (Mute), Tab (Scoreboard)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const engine = engineRef.current;
-      if (!engine || !hud) return;
-      if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+      if (!engine || !hud || editorOpen) return;
+      if (isTextEntryTarget(e.target)) return;
+
+      if (e.code === 'F2' && hud.isTestPlay) {
+        e.preventDefault();
+        handleReturnToEditor();
+        return;
+      }
 
       if (e.code === 'KeyM') {
         engine.toggleMute();
@@ -170,7 +333,7 @@ export default function App() {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [buyMenuOpen, closeBuyMenu, hud]);
+  }, [buyMenuOpen, closeBuyMenu, editorOpen, handleReturnToEditor, hud]);
 
   // Close buy menu automatically if buy phase ends or player dies
   useEffect(() => {
@@ -243,10 +406,21 @@ export default function App() {
     setBuyMenuOpen(false);
     setShowScoreboard(false);
     networkClient.leaveRoom();
+    engineRef.current?.setSuspended(false);
     engineRef.current?.setScreen('title');
   }, []);
 
   const screen = hud?.screen ?? 'title';
+
+  useEffect(() => {
+    engineRef.current?.setUiOverlayOpen(buyMenuOpen || showScoreboard);
+  }, [buyMenuOpen, showScoreboard]);
+
+  useEffect(() => {
+    if (screen !== 'title') {
+      engineRef.current?.setupNetworkListeners();
+    }
+  }, [screen]);
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#0e1116]">
@@ -254,8 +428,10 @@ export default function App() {
       <div
         ref={mountRef}
         className="fixed inset-0"
-        onMouseDown={() => {
-          if (screen === 'playing' && !buyMenuOpen) {
+        onMouseDown={(e) => {
+          const el = e.target as HTMLElement | null;
+          if (el?.closest('[data-ui-interactive="true"]')) return;
+          if (!editorOpen && screen === 'playing' && !buyMenuOpen && !showScoreboard) {
             try {
               engineRef.current?.requestPointerLock();
             } catch {}
@@ -263,7 +439,7 @@ export default function App() {
         }}
       />
 
-      {screen === 'title' && (
+      {screen === 'title' && !editorOpen && (
         <MainMenu
           sensitivity={sensitivity}
           onChangeSensitivity={handleChangeSensitivity}
@@ -271,6 +447,38 @@ export default function App() {
           onChangeCrosshair={handleChangeCrosshair}
           onStartMatch={handleStartMatch}
           onPreviewMap={handlePreviewMap}
+          savedCustomMaps={savedCustomMaps}
+          activeCustomMapId={activeCustomMapId}
+          preferredCustomSyncStamp={preferredCustomSyncStamp}
+          onSelectSavedCustomMap={handleSelectSavedCustomMap}
+          onSaveImportedCustomMap={(map) => {
+            const saved = handleSaveToLibrary(map, true);
+            return (
+              saved ?? {
+                id: 'imported_temp',
+                updatedAt: Date.now(),
+                data: map,
+                byteSize: JSON.stringify(map).length,
+              }
+            );
+          }}
+          onOpenMapEditor={handleOpenMapEditor}
+        />
+      )}
+
+      {editorOpen && (
+        <MapEditor
+          history={editorHistory}
+          onChangeHistory={setEditorHistory}
+          savedMaps={savedCustomMaps}
+          activeSavedId={activeCustomMapId}
+          onSelectSavedMap={handleSelectSavedCustomMap}
+          onSaveToLibrary={handleSaveToLibrary}
+          onRenameSavedMap={handleRenameSavedMap}
+          onDeleteSavedMap={handleDeleteSavedMap}
+          onTestPlay={handleTestPlayCustomMap}
+          onFinishAndReturnToMenu={handleFinishEditorToMenu}
+          onExitWithoutSave={handleExitEditorWithoutSave}
         />
       )}
 
@@ -290,6 +498,7 @@ export default function App() {
           onToggleXray={handleToggleXray}
           onToggleFullscreen={handleToggleFullscreen}
           onPause={handlePause}
+          onReturnToEditor={hud.isTestPlay ? handleReturnToEditor : undefined}
         />
       )}
 
@@ -312,6 +521,7 @@ export default function App() {
           onResume={handleResume}
           onRestart={handleRestart}
           onMainMenu={handleMainMenu}
+          onReturnToEditor={hud.isTestPlay ? handleReturnToEditor : undefined}
         />
       )}
     </div>

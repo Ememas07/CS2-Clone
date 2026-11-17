@@ -11,6 +11,7 @@ interface StatusModalProps {
   onResume: () => void;
   onRestart: () => void;
   onMainMenu: () => void;
+  onReturnToEditor?: () => void;
 }
 
 export function StatusModal({
@@ -22,6 +23,7 @@ export function StatusModal({
   onResume,
   onRestart,
   onMainMenu,
+  onReturnToEditor,
 }: StatusModalProps) {
   const [pauseTab, setPauseTab] = useState<'match' | 'crosshair'>('match');
   const isPaused = hud.screen === 'paused';
@@ -121,6 +123,15 @@ export function StatusModal({
                   >
                     Resume Match [Esc]
                   </button>
+                  {hud.isTestPlay && onReturnToEditor && (
+                    <button
+                      type="button"
+                      onClick={onReturnToEditor}
+                      className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm uppercase tracking-wider rounded transition-colors"
+                    >
+                      Return to Map Editor [F2]
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={onRestart}
@@ -219,6 +230,15 @@ export function StatusModal({
             )}
 
             <div className="space-y-2.5">
+              {hud.isTestPlay && onReturnToEditor && (
+                <button
+                  type="button"
+                  onClick={onReturnToEditor}
+                  className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm uppercase tracking-wider rounded transition-colors"
+                >
+                  Return to Map Editor [F2]
+                </button>
+              )}
               <button
                 type="button"
                 data-start="true"

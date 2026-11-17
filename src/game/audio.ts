@@ -36,7 +36,10 @@ class TacticalAudioEngine {
   private ttsBackendAvailable: boolean | null = null;
   private voicelineQueue: VoicelineEvent[] = [];
   private playingVoiceline = false;
+  private voicelineSessionGen = 0;
   private activeVoicelineSource: AudioBufferSourceNode | null = null;
+  private speechFallbackTimer: number | null = null;
+  private activeSpeechResolve: (() => void) | null = null;
   private preloaded = false;
 
   public setListenerPose(x: number, y: number, z: number, yaw: number): void {
@@ -107,20 +110,49 @@ class TacticalAudioEngine {
     this.ensureContext();
   }
 
-  public setMuted(muted: boolean): void {
-    this.muted = muted;
-    if (muted) {
-      this.voicelineQueue = [];
+  public stopVoicelines(): void {
+    this.voicelineSessionGen++;
+    this.voicelineQueue = [];
+    if (this.activeVoicelineSource) {
+      this.activeVoicelineSource.onended = null;
       try {
-        this.activeVoicelineSource?.stop();
+        this.activeVoicelineSource.stop();
       } catch {
         // ignore already stopped
       }
       this.activeVoicelineSource = null;
-      this.playingVoiceline = false;
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
+    }
+    if (this.speechFallbackTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.speechFallbackTimer);
+      this.speechFallbackTimer = null;
+    }
+    this.playingVoiceline = false;
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    if (this.activeSpeechResolve) {
+      const fn = this.activeSpeechResolve;
+      this.activeSpeechResolve = null;
+      fn();
+    }
+  }
+
+  public resetSession(): void {
+    this.stopVoicelines();
+    if (this.ctx) {
+      const oldCtx = this.ctx;
+      this.ctx = null;
+      this.noiseBuffer = null;
+      if (typeof oldCtx.close === 'function' && oldCtx.state !== 'closed') {
+        oldCtx.close().catch(() => {});
       }
+    }
+  }
+
+  public setMuted(muted: boolean): void {
+    this.muted = muted;
+    if (muted) {
+      this.stopVoicelines();
     }
   }
 
@@ -212,12 +244,13 @@ class TacticalAudioEngine {
   private async drainVoicelineQueue(): Promise<void> {
     if (this.playingVoiceline) return;
     this.playingVoiceline = true;
+    const gen = this.voicelineSessionGen;
 
     try {
-      while (this.voicelineQueue.length > 0 && !this.muted) {
+      while (this.voicelineQueue.length > 0 && !this.muted && gen === this.voicelineSessionGen) {
         const event = this.voicelineQueue.shift()!;
         const audioBuf = await this.fetchVoicelineBuffer(event);
-        if (this.muted) break;
+        if (this.muted || gen !== this.voicelineSessionGen) break;
 
         if (audioBuf) {
           await this.playAudioBufferWithRadioFilter(audioBuf);
@@ -226,7 +259,9 @@ class TacticalAudioEngine {
         }
       }
     } finally {
-      this.playingVoiceline = false;
+      if (gen === this.voicelineSessionGen) {
+        this.playingVoiceline = false;
+      }
     }
   }
 
@@ -284,9 +319,19 @@ class TacticalAudioEngine {
       const finish = () => {
         if (settled) return;
         settled = true;
-        this.playRadioSquelch(false);
+        if (this.speechFallbackTimer !== null && typeof window !== 'undefined') {
+          window.clearTimeout(this.speechFallbackTimer);
+          this.speechFallbackTimer = null;
+        }
+        if (this.activeSpeechResolve === finish) {
+          this.activeSpeechResolve = null;
+        }
+        if (!this.muted) {
+          this.playRadioSquelch(false);
+        }
         resolve();
       };
+      this.activeSpeechResolve = finish;
 
       try {
         const utter = new SpeechSynthesisUtterance(text);
@@ -296,7 +341,7 @@ class TacticalAudioEngine {
         utter.onend = finish;
         utter.onerror = finish;
         window.speechSynthesis.speak(utter);
-        window.setTimeout(finish, 3400);
+        this.speechFallbackTimer = window.setTimeout(finish, 3400);
       } catch {
         finish();
       }

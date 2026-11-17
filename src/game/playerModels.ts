@@ -185,3 +185,20 @@ export function createOperatorModel(actorId: string, team: Team): OperatorMeshHa
     xrayMeshes,
   };
 }
+
+export function disposeOperatorModel(handle: OperatorMeshHandle): void {
+  const geos = new Set<THREE.BufferGeometry>();
+  const mats = new Set<THREE.Material>();
+  handle.root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    if (mesh.geometry) geos.add(mesh.geometry);
+    if (Array.isArray(mesh.material)) {
+      for (const m of mesh.material) mats.add(m);
+    } else if (mesh.material) {
+      mats.add(mesh.material);
+    }
+  });
+  for (const g of geos) g.dispose();
+  for (const m of mats) m.dispose();
+}
